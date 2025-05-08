@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Augmented Reality Marker Detector</title>
+
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      user-select: none;
+    }
+    #canvas-container {
+      text-align: center;
+    }
+  </style>
+
+  
+  <script type="text/javascript" src="js/cv.js"></script> 
+  <script type="text/javascript" src="js/aruco.js"></script> 
+
+  <script>
+    var video, canvas, context, imageData, detector;
+  
+    function onLoad() {
+      video = document.getElementById("video");
+      canvas = document.getElementById("canvas");
+      context = canvas.getContext("2d");
+  
+      canvas.width = parseInt(canvas.style.width);
+      canvas.height = parseInt(canvas.style.height);
+  
+      if (navigator.mediaDevices === undefined) {
+        navigator.mediaDevices = {};
+      }
+  
+      if (navigator.mediaDevices.getUserMedia === undefined) {
+        navigator.mediaDevices.getUserMedia = function (constraints) {
+          var getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+  
+          if (!getUserMedia) {
+            return Promise.reject(new Error('getUserMedia is not implemented in this browser'));
+          }
+  
+          return new Promise(function (resolve, reject) {
+            getUserMedia.call(navigator, constraints, resolve, reject);
+          });
+        }
+      }
+  
+      navigator.mediaDevices
+        .getUserMedia({ video: true })
+        .then(function (stream) {
+          if ("srcObject" in video) {
+            video.srcObject = stream;
+          } else {
+            video.src = window.URL.createObjectURL(stream);
+          }
+        })
+        .catch(function (err) {
+          console.log(err.name + ": " + err.message);
+        });
+  
+      detector = new AR.Detector();
+      requestAnimationFrame(tick);
+    }
+  
+    function tick() {
+      requestAnimationFrame(tick);
+  
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        snapshot();
+        var markers = detector.detect(imageData);
+        drawCorners(markers);
+        drawIds(markers);
+        drawLinesAndDistances(markers); // draw lines and display distances
+      }
+    }
+  
+    function snapshot() {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    }
+  
+    function drawCorners(markers) {
+      context.lineWidth = 3;
+  
+      for (let i = 0; i < markers.length; ++i) {
+        let corners = markers[i].corners;
+        context.strokeStyle = "red";
+        context.beginPath();
+  
+        for (let j = 0; j < corners.length; ++j) {
+          let corner = corners[j];
+          context.moveTo(corner.x, corner.y);
+          corner = corners[(j + 1) % corners.length];
+          context.lineTo(corner.x, corner.y);
+        }
+  
+        context.stroke();
+        context.closePath();
+  
+        context.strokeStyle = "green";
+        context.strokeRect(corners[0].x - 2, corners[0].y - 2, 4, 4);
+      }
+    }
+  
+    function drawIds(markers) {
+      context.strokeStyle = "blue";
+      context.lineWidth = 1;
+  
+      for (let i = 0; i < markers.length; ++i) {
+        let corners = markers[i].corners;
+        let x = Infinity, y = Infinity;
+  
+        for (let j = 0; j < corners.length; ++j) {
+          let corner = corners[j];
+          x = Math.min(x, corner.x);
+          y = Math.min(y, corner.y);
+        }
+  
+        context.strokeText(markers[i].id, x, y);
+      }
+    }
+  
+    // Draw lines and distances
+    function drawLinesAndDistances(markers) {
+      context.lineWidth = 2;
+      context.strokeStyle = "purple";
+  
+      for (let i = 0; i < markers.length; ++i) {
+        const marker1 = markers[i];
+        const center1 = calculateCenter(marker1.corners);
+        const distance1 = calculateDistanceFromCamera(marker1); // in inches
+  
+        for (let j = i + 1; j < markers.length; ++j) {
+          const marker2 = markers[j];
+          const center2 = calculateCenter(marker2.corners);
+          const distance2 = calculateDistanceFromCamera(marker2); // in inches
+  
+          // Draw line between centers
+          context.beginPath();
+          context.moveTo(center1.x, center1.y);
+          context.lineTo(center2.x, center2.y);
+          context.stroke();
+          context.closePath();
+  
+          // Distance between centers in pixels
+          const distancePixels = calculateDistance(center1, center2);
+  
+          // Convert to inches
+          const distanceInches = convertPixelsToInches(distancePixels, marker1);
+  
+          // Midpoint for label
+          const midX = (center1.x + center2.x) / 2;
+          const midY = (center1.y + center2.y) / 2;
+  
+          context.fillStyle = "black";
+          context.font = "36px monospace";
+         // context.fillText(`~${distanceInches.toFixed(2)} in`, midX, midY);
+  
+          // Distance from camera labels
+          const textX = Math.min(center1.x, center2.x) - 40;
+          const textY = Math.min(center1.y, center2.y) - 30;
+          context.fillText(`Dist1: ${distance1.toFixed(2)} in`, textX, textY);
+         context.fillText(`Dist2: ${distance2.toFixed(2)} in`, textX, textY + 15);
+        }
+      }
+    }
+  
+    // Calculate center of marker
+    function calculateCenter(corners) {
+      const x = (corners[0].x + corners[1].x + corners[2].x + corners[3].x) / 4;
+      const y = (corners[0].y + corners[1].y + corners[2].y + corners[3].y) / 4;
+      return { x, y };
+    }
+  
+    // Euclidean distance between two points
+    function calculateDistance(p1, p2) {
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+  
+    // Estimate real-world distance from camera to marker (in inches)
+    function calculateDistanceFromCamera(marker) {
+      const REAL_MARKER_SIZE = 5.0; // cm
+      const FOCAL_LENGTH = 1900;    // px (adjust with calibration)
+  
+      const corners = marker.corners;
+      const dx = corners[0].x - corners[1].x;
+      const dy = corners[0].y - corners[1].y;
+      const pixelSize = Math.sqrt(dx * dx + dy * dy);
+  
+      const distanceCm = (FOCAL_LENGTH * REAL_MARKER_SIZE) / pixelSize;
+      const distanceInches = distanceCm * 0.393701;
+
+      console.log("distance from camera:",distanceInches)
+      return distanceInches;
+    }
+  
+    // Convert pixel distance between two markers to inches
+    function convertPixelsToInches(pixelDistance, marker) {
+      const REAL_MARKER_SIZE = 5.0; // cm
+  
+      const corners = marker.corners;
+      const dx = corners[0].x - corners[1].x;
+      const dy = corners[0].y - corners[1].y;
+      const markerPixelWidth = Math.sqrt(dx * dx + dy * dy);
+  
+      const pixelsPerCm = markerPixelWidth / REAL_MARKER_SIZE;
+      const pixelsPerInch = pixelsPerCm / 2.54;
+  
+      return pixelDistance / pixelsPerInch;
+    }
+  
+    window.onload = onLoad;
+  </script>
+  
+  
+  
+
+</head>
+
+<body style="font-family: monospace;">
+
+  <div id="canvas-container">
+    <div style="margin: 10px;"><strong>-= Augmented Reality Marker Detector =-</strong></div>
+    <video id="video" autoplay="true" style="display:none;"></video>
+    <canvas id="canvas" style="width:640px; height:480px;"></canvas>
+    <div style="margin: 15px;"><strong>Powered by <a href="https://github.com/jcmellado/js-aruco">js-aruco</a></strong></div>
+  </div>
+
+</body>
+  
+</html>
