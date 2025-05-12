@@ -21,8 +21,7 @@
   <!-- ArUco + math libraries -->
   <script src="js/cv.js"></script>
   <script src="js/aruco.js"></script>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+  <script src="./js/mathjs.js"></script>
 
 </head>
 
@@ -32,14 +31,20 @@
   <div id="threeContainer" style="margin-left: 20px;"></div>
   <div id="infoPanel"
     style="position:absolute; top:10px; left:10px; background:#fff; padding:10px; font-family:monospace; font-size:14px; border:1px solid #ccc;">
+    <b>Detected Tags:</b><br>
+    <div id="tagInfo"></div>
+    <br>
+    <b>Camera Position (m):</b>
+    <div id="camInfo"></div>
+    <hr>
+    <b>Scanned Items:</b>
+    <div id="scannedList"></div>
   </div>
-
 
   <!-- Three.js + App Logic -->
   <script type="module">
-    import * as THREE from 'https://unpkg.com/three@0.158.0/build/three.module.js';
+    import * as THREE from './js/three.js';
 
-    // === CAMERA & MARKER SETUP ===
     let video, canvas, context, imageData, detector;
 
     const knownTags3D = {
@@ -50,6 +55,16 @@
       5: { x: 6.5, y: 7, z: 9 }
     };
 
+    const itemScanCounts = {};
+    const labelSprites = [];
+    let scanBuffer = "";
+    let lastScanTime = 0;
+    const barcodeScanDelay = 1000;
+
+    let lastCameraPos = { x: 20, y: 12, z: 20 };
+    const smoothingFactor = 0.009;
+    const tagSpheres = [];
+
     function onLoad() {
       video = document.getElementById("video");
       canvas = document.getElementById("canvas");
@@ -57,22 +72,105 @@
 
       navigator.mediaDevices
         .getUserMedia({ video: true })
-        .then(function (stream) {
-          video.srcObject = stream;
-        })
-        .catch(function (err) {
-          console.error(err);
-        });
+        .then(stream => video.srcObject = stream)
+        .catch(err => console.error(err));
 
       detector = new AR.Detector();
       init3DScene();
       requestAnimationFrame(tick);
     }
 
-    let lastCameraPos = { x: 20, y: 12, z: 20 }; // Initial camera position
-    const smoothingFactor = 0.009; // Smoothing factor (0 to 1). Lower values mean smoother movement.
+    window.addEventListener('keydown', (e) => {
+      const now = Date.now();
 
-    // Function to smoothly update the camera position
+      if (now - lastScanTime > barcodeScanDelay) scanBuffer = "";
+      lastScanTime = now;
+
+      if (e.key === 'Enter') {
+        handleBarcodeScan(scanBuffer.trim());
+        scanBuffer = "";
+      } else {
+        scanBuffer += e.key;
+      }
+    });
+
+    function handleBarcodeScan(code) {
+      if (!itemScanCounts[code]) {
+        itemScanCounts[code] = 1;
+        console.log(`Scanned "${code}" once.`);
+      } else {
+        itemScanCounts[code]++;
+        if (itemScanCounts[code] === 2) {
+          console.log(`Second scan for "${code}". Placing object.`);
+          if (lastCameraPos) {
+            const box = new THREE.Mesh(
+              new THREE.BoxGeometry(0.8, 0.8, 0.8),
+              new THREE.MeshStandardMaterial({ color: 0x0000ff })
+            );
+            box.position.set(lastCameraPos.x, lastCameraPos.z, lastCameraPos.y);
+            scene.add(box);
+
+            const label = createTextLabel(code);
+            label.position.set(lastCameraPos.x, lastCameraPos.z + 1.0, lastCameraPos.y);
+            scene.add(label);
+            labelSprites.push(label);
+          }
+        }
+      }
+      updateScannedItemsDisplay();
+    }
+
+    function updateScannedItemsDisplay() {
+      const scannedListHTML = Object.keys(itemScanCounts)
+        .map(code => `<li>${code}: ${itemScanCounts[code]} scan(s)</li>`)
+        .join('');
+      document.getElementById("scannedList").innerHTML = `<ul>${scannedListHTML}</ul>`;
+    }
+
+    function createTextLabel(text) {
+  const dpi = window.devicePixelRatio || 1;
+
+  const width = 512;
+  const height = 128;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width * dpi;
+  canvas.height = height * dpi;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpi, dpi); // For high DPI screens
+
+  // Optional: Draw semi-transparent background box
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, 0, width, height);
+
+  // Optional: White border around the background
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, width, height);
+
+  // Text styling
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 48px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, width / 2, height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(5, 1.5, 1); // Bigger label in scene
+
+  return sprite;
+}
+
+
     function smoothCameraPosition(newPos) {
       return {
         x: lastCameraPos.x + smoothingFactor * (newPos.x - lastCameraPos.x),
@@ -81,15 +179,12 @@
       };
     }
 
-    // Inside the tick function, where the camera position is updated:
     function tick() {
       requestAnimationFrame(tick);
-
       if (video.readyState === video.HAVE_ENOUGH_DATA) {
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         imageData = context.getImageData(0, 0, canvas.width, canvas.height);
         const markers = detector.detect(imageData);
-
         drawCorners(markers);
         drawIds(markers);
 
@@ -97,24 +192,17 @@
           const tagData = markers
             .filter(marker => knownTags3D.hasOwnProperty(marker.id))
             .slice(0, 4)
-            .map(marker => {
-              const id = marker.id;
-              const pos = knownTags3D[id];
-              const dist = calculateDistanceFromCamera(marker);
-
-              return { id, pos, distance: dist };
-            });
+            .map(marker => ({
+              id: marker.id,
+              pos: knownTags3D[marker.id],
+              distance: calculateDistanceFromCamera(marker)
+            }));
 
           if (tagData.length >= 4) {
             const cameraPos = trilaterate3D(tagData);
             if (cameraPos) {
-              console.log("Camera 3D position (m):", JSON.stringify(cameraPos, null, 2));
-
-              // Smooth the camera position before updating
               const smoothedCameraPos = smoothCameraPosition(cameraPos);
               update3DMarkers(tagData, smoothedCameraPos);
-
-              // Update the lastCameraPos to the new smoothed position
               lastCameraPos = smoothedCameraPos;
             }
           }
@@ -140,46 +228,20 @@
     function drawIds(markers) {
       context.fillStyle = "blue";
       context.font = "20px monospace";
-
       markers.forEach(marker => {
         const x = Math.min(...marker.corners.map(c => c.x));
         const y = Math.min(...marker.corners.map(c => c.y));
-
-        // Draw the ID of the marker
         context.fillText(marker.id, x, y);
-
-        // If the marker is the center tag (Tag 5), label it as "Center"
         if (marker.id === 5) {
-          context.fillStyle = "green";  // Change color for the center tag
-          context.fillText("Center", x + 10, y + 10); // Label slightly offset from the corner
+          context.fillStyle = "green";
+          context.fillText("Center", x + 10, y + 10);
         }
       });
     }
 
-    // Update Room Dimensions
-    function updateRoomDimensions() {
-      // Get new dimensions from the input fields
-      const width = parseFloat(document.getElementById("width").value);
-      const height = parseFloat(document.getElementById("height").value);
-      const depth = parseFloat(document.getElementById("depth").value);
-
-      alert(`Room Dimensions Updated: Width = ${width}m, Height = ${height}m, Depth = ${depth}m`);
-
-      // Update the geometry of the box
-      const newBoxGeometry = new THREE.BoxGeometry(width, height, depth);
-      const boxEdges = new THREE.EdgesGeometry(newBoxGeometry);
-      const boxMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa });
-
-      // Remove the old wireframe and add the new one
-      scene.remove(boxWireframe);
-      boxWireframe = new THREE.LineSegments(boxEdges, boxMaterial);
-      boxWireframe.position.set(width / 2, height / 2, depth / 2); // Update position to center the new box
-      scene.add(boxWireframe);
-    }
-
     function calculateDistanceFromCamera(marker) {
-      const REAL_MARKER_SIZE = 5.0; // cm
-      const FOCAL_LENGTH = 1800;    // px
+      const REAL_MARKER_SIZE = 1.5; // cm
+      const FOCAL_LENGTH = 1300;    // px
       const dx = marker.corners[0].x - marker.corners[1].x;
       const dy = marker.corners[0].y - marker.corners[1].y;
       const pixelSize = Math.sqrt(dx * dx + dy * dy);
@@ -190,19 +252,12 @@
     function trilaterate3D(tags) {
       if (tags.length < 4) return null;
       const A = [], b = [];
-
       for (let i = 1; i < tags.length; i++) {
         const P1 = tags[0].pos;
         const Pi = tags[i].pos;
         const r1 = tags[0].distance;
         const ri = tags[i].distance;
-
-        A.push([
-          2 * (Pi.x - P1.x),
-          2 * (Pi.y - P1.y),
-          2 * (Pi.z - P1.z)
-        ]);
-
+        A.push([2 * (Pi.x - P1.x), 2 * (Pi.y - P1.y), 2 * (Pi.z - P1.z)]);
         b.push(
           r1 * r1 - ri * ri
           - P1.x * P1.x + Pi.x * Pi.x
@@ -210,59 +265,40 @@
           - P1.z * P1.z + Pi.z * Pi.z
         );
       }
-
       const AT = math.transpose(A);
       const ATA = math.multiply(AT, A);
       const ATb = math.multiply(AT, b);
       const pos = math.lusolve(ATA, ATb);
-      return {
-        x: pos[0][0],
-        y: pos[1][0],
-        z: pos[2][0]
-      };
+      return { x: pos[0][0], y: pos[1][0], z: pos[2][0] };
     }
 
-    // === 3D Scene Setup ===
     let scene, camera3D, renderer, cameraMarker;
-    const tagSpheres = [];
 
     function init3DScene() {
       scene = new THREE.Scene();
-
-      // Add Axes Helper (for debugging the axes)
-      const axesHelper = new THREE.AxesHelper(3); // size of the helper lines
-      axesHelper.position.set(6.5, 0, 7); // same as floor center
+      const axesHelper = new THREE.AxesHelper(3);
+      axesHelper.position.set(6.5, 0, 7);
       scene.add(axesHelper);
 
-      // Perspective camera
       camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
-      camera3D.position.set(12, 12, 50); // X, Y (height), Z
-      camera3D.lookAt(6.5, 4.5, 7); // center of the room
-
-      /*      camera3D.position.set(15, 15, 15);
-           camera3D.lookAt(6.5, 7, 4.5); */
+      camera3D.position.set(12, 12, 20);
+      camera3D.lookAt(6.5, 4.5, 7);
 
       renderer = new THREE.WebGLRenderer();
       renderer.setSize(800, 600);
-      renderer.setClearColor(0xffffff, 1); // white background, fully opaque
-
       document.getElementById("threeContainer").appendChild(renderer.domElement);
 
-      // Room box (13×14×9 meters)
       const boxGeometry = new THREE.BoxGeometry(13, 9, 14);
       const boxEdges = new THREE.EdgesGeometry(boxGeometry);
       const boxMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa });
       const boxWireframe = new THREE.LineSegments(boxEdges, boxMaterial);
-      boxWireframe.position.set(13 / 2, 9 / 2, 14 / 2); // Center of the room
+      boxWireframe.position.set(13 / 2, 9 / 2, 14 / 2);
       scene.add(boxWireframe);
 
-      // Add a grid to visualize space better
-      // Add a grid to visualize the floor of the room
       const gridHelper = new THREE.GridHelper(20, 20);
-      gridHelper.position.set(6.5, 0, 7); // center of the floor (X, Y, Z)
+      gridHelper.position.set(6.5, 0, 7);
       scene.add(gridHelper);
 
-      // Light
       const light = new THREE.PointLight(0xffffff, 1, 100);
       light.position.set(13, 9, 14);
       scene.add(light);
@@ -270,7 +306,6 @@
       const ambient = new THREE.AmbientLight(0xffffff, 0.95);
       scene.add(ambient);
 
-      // Marker for camera
       const camGeometry = new THREE.SphereGeometry(1, 16, 16);
       const camMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
       cameraMarker = new THREE.Mesh(camGeometry, camMaterial);
@@ -281,6 +316,9 @@
 
     function animate() {
       requestAnimationFrame(animate);
+      labelSprites.forEach(sprite => {
+        sprite.lookAt(camera3D.position);
+      });
       renderer.render(scene, camera3D);
     }
 
@@ -289,35 +327,28 @@
       tagSpheres.length = 0;
 
       tagData.forEach(tag => {
-
         const sphere = new THREE.Mesh(
           new THREE.SphereGeometry(1, 12, 12),
           new THREE.MeshStandardMaterial({ color: 0x00ff00 })
         );
-        sphere.position.set(tag.pos.x, tag.pos.z, tag.pos.y); // y <-> z
+        sphere.position.set(tag.pos.x, tag.pos.z, tag.pos.y);
         scene.add(sphere);
         tagSpheres.push(sphere);
       });
 
       if (cameraPos) {
         cameraMarker.position.set(cameraPos.x, cameraPos.z, cameraPos.y);
+        document.getElementById("camInfo").innerHTML = `X: ${cameraPos.x.toFixed(2)}<br>Y: ${cameraPos.y.toFixed(2)}<br>Z: ${cameraPos.z.toFixed(2)}`;
       }
 
       const info = tagData.map(tag =>
-        `Tag ${tag.id}: (${tag.pos.x}, ${tag.pos.y}, ${tag.pos.z})m — Dist: ${tag.distance.toFixed(2)}in`
+        `Tag ${tag.id}: (${tag.pos.x}, ${tag.pos.y}, ${tag.pos.z}) — Dist: ${tag.distance.toFixed(2)}in`
       ).join("<br>");
-
-      const camInfo = cameraPos
-        ? `<br><b>Camera Position (m):</b><br>X: ${cameraPos.x.toFixed(2)}, Y: ${cameraPos.y.toFixed(2)}, Z: ${cameraPos.z.toFixed(2)}`
-        : "";
-
-      document.getElementById("infoPanel").innerHTML = `<b>Detected Tags:</b><br>${info}${camInfo}`;
+      document.getElementById("tagInfo").innerHTML = info;
     }
 
     window.onload = onLoad;
   </script>
-
-
 </body>
 
 </html>

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Camera Position via Trilateration</title>
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      user-select: none;
+    }
+
+    #canvas-container {
+      text-align: center;
+    }
+  </style>
+
+  <!-- ArUco + math libraries -->
+  <script src="js/cv.js"></script>
+  <script src="js/aruco.js"></script>
+  <script src="./js/mathjs.js"></script>
+
+</head>
+
+<body>
+  <video id="video" autoplay playsinline style="display:none;"></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div id="threeContainer" style="margin-left: 20px;"></div>
+  <div id="infoPanel"
+    style="position:absolute; top:10px; left:10px; background:#fff; padding:10px; font-family:monospace; font-size:14px; border:1px solid #ccc;">
+  </div>
+
+
+  <!-- Three.js + App Logic -->
+  <script type="module">
+    import * as THREE from './js/three.js';
+
+    // === CAMERA & MARKER SETUP ===
+    let video, canvas, context, imageData, detector;
+
+    const knownTags3D = {
+      1: { x: 0, y: 0, z: 9 },
+      2: { x: 13, y: 0, z: 9 },
+      3: { x: 13, y: 14, z: 9 },
+      4: { x: 0, y: 14, z: 9 },
+      5: { x: 6.5, y: 7, z: 9 }
+    };
+
+    function onLoad() {
+      video = document.getElementById("video");
+      canvas = document.getElementById("canvas");
+      context = canvas.getContext("2d");
+
+      navigator.mediaDevices
+        .getUserMedia({ video: true })
+        .then(function (stream) {
+          video.srcObject = stream;
+        })
+        .catch(function (err) {
+          console.error(err);
+        });
+
+      detector = new AR.Detector();
+      init3DScene();
+      requestAnimationFrame(tick);
+    }
+
+    let lastCameraPos = { x: 20, y: 12, z: 20 }; // Initial camera position
+    const smoothingFactor = 0.009; // Smoothing factor (0 to 1). Lower values mean smoother movement.
+
+    // Function to smoothly update the camera position
+    function smoothCameraPosition(newPos) {
+      return {
+        x: lastCameraPos.x + smoothingFactor * (newPos.x - lastCameraPos.x),
+        y: lastCameraPos.y + smoothingFactor * (newPos.y - lastCameraPos.y),
+        z: lastCameraPos.z + smoothingFactor * (newPos.z - lastCameraPos.z)
+      };
+    }
+
+    // Inside the tick function, where the camera position is updated:
+    function tick() {
+      requestAnimationFrame(tick);
+
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+        const markers = detector.detect(imageData);
+
+        drawCorners(markers);
+        drawIds(markers);
+
+        if (markers.length >= 4) {
+          const tagData = markers
+            .filter(marker => knownTags3D.hasOwnProperty(marker.id))
+            .slice(0, 4)
+            .map(marker => {
+              const id = marker.id;
+              const pos = knownTags3D[id];
+              const dist = calculateDistanceFromCamera(marker);
+              return { id, pos, distance: dist };
+            });
+
+          if (tagData.length >= 4) {
+            const cameraPos = trilaterate3D(tagData);
+            if (cameraPos) {
+              console.log("Camera 3D position (m):", JSON.stringify(cameraPos, null, 2));
+
+              // Smooth the camera position before updating
+              const smoothedCameraPos = smoothCameraPosition(cameraPos);
+              update3DMarkers(tagData, smoothedCameraPos);
+
+              // Update the lastCameraPos to the new smoothed position
+              lastCameraPos = smoothedCameraPos;
+            }
+          }
+        }
+      }
+    }
+
+    function drawCorners(markers) {
+      context.lineWidth = 3;
+      context.strokeStyle = "red";
+      markers.forEach(marker => {
+        context.beginPath();
+        for (let j = 0; j < marker.corners.length; j++) {
+          const c1 = marker.corners[j];
+          const c2 = marker.corners[(j + 1) % marker.corners.length];
+          context.moveTo(c1.x, c1.y);
+          context.lineTo(c2.x, c2.y);
+        }
+        context.stroke();
+      });
+    }
+
+    function drawIds(markers) {
+      context.fillStyle = "blue";
+      context.font = "20px monospace";
+
+      markers.forEach(marker => {
+        const x = Math.min(...marker.corners.map(c => c.x));
+        const y = Math.min(...marker.corners.map(c => c.y));
+
+        // Draw the ID of the marker
+        context.fillText(marker.id, x, y);
+
+        // If the marker is the center tag (Tag 5), label it as "Center"
+        if (marker.id === 5) {
+          context.fillStyle = "green";  // Change color for the center tag
+          context.fillText("Center", x + 10, y + 10); // Label slightly offset from the corner
+        }
+      });
+    }
+
+
+
+    function calculateDistanceFromCamera(marker) {
+      const REAL_MARKER_SIZE = 1.5; // cm
+      const FOCAL_LENGTH = 1300;    // px
+      const dx = marker.corners[0].x - marker.corners[1].x;
+      const dy = marker.corners[0].y - marker.corners[1].y;
+      const pixelSize = Math.sqrt(dx * dx + dy * dy);
+      const distanceCm = (FOCAL_LENGTH * REAL_MARKER_SIZE) / pixelSize;
+      return distanceCm * 0.393701; // inches
+    }
+
+    function trilaterate3D(tags) {
+      if (tags.length < 4) return null;
+      const A = [], b = [];
+
+      for (let i = 1; i < tags.length; i++) {
+        const P1 = tags[0].pos;
+        const Pi = tags[i].pos;
+        const r1 = tags[0].distance;
+        const ri = tags[i].distance;
+
+        A.push([
+          2 * (Pi.x - P1.x),
+          2 * (Pi.y - P1.y),
+          2 * (Pi.z - P1.z)
+        ]);
+
+        b.push(
+          r1 * r1 - ri * ri
+          - P1.x * P1.x + Pi.x * Pi.x
+          - P1.y * P1.y + Pi.y * Pi.y
+          - P1.z * P1.z + Pi.z * Pi.z
+        );
+      }
+
+      const AT = math.transpose(A);
+      const ATA = math.multiply(AT, A);
+      const ATb = math.multiply(AT, b);
+      const pos = math.lusolve(ATA, ATb);
+      return {
+        x: pos[0][0],
+        y: pos[1][0],
+        z: pos[2][0]
+      };
+    }
+
+    // === 3D Scene Setup ===
+    let scene, camera3D, renderer, cameraMarker, loadMarker;
+    const tagSpheres = [];
+
+    function init3DScene() {
+      scene = new THREE.Scene();
+
+      // Add Axes Helper (for debugging the axes)
+      const axesHelper = new THREE.AxesHelper(3); // size of the helper lines
+      axesHelper.position.set(6.5, 0, 7); // same as floor center
+      scene.add(axesHelper);
+
+      // Perspective camera
+      camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
+      camera3D.position.set(12, 12, 20); // X, Y (height), Z
+      camera3D.lookAt(6.5, 4.5, 7); // center of the room
+
+      /*      camera3D.position.set(15, 15, 15);
+           camera3D.lookAt(6.5, 7, 4.5); */
+
+      renderer = new THREE.WebGLRenderer();
+      renderer.setSize(800, 600);
+      document.getElementById("threeContainer").appendChild(renderer.domElement);
+
+      // Room box (13×14×9 meters)
+      const boxGeometry = new THREE.BoxGeometry(13, 9, 14);
+      const boxEdges = new THREE.EdgesGeometry(boxGeometry);
+      const boxMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa });
+      const boxWireframe = new THREE.LineSegments(boxEdges, boxMaterial);
+      boxWireframe.position.set(13 / 2, 9 / 2, 14 / 2); // Center of the room
+      scene.add(boxWireframe);
+
+      // Add a grid to visualize space better
+      // Add a grid to visualize the floor of the room
+      const gridHelper = new THREE.GridHelper(20, 20);
+      gridHelper.position.set(6.5, 0, 7); // center of the floor (X, Y, Z)
+      scene.add(gridHelper);
+
+      // Light
+      const light = new THREE.PointLight(0xffffff, 1, 100);
+      light.position.set(13, 9, 14);
+      scene.add(light);
+
+      const ambient = new THREE.AmbientLight(0xffffff, 0.95);
+      scene.add(ambient);
+
+      // Marker for camera
+      const camGeometry = new THREE.SphereGeometry(1, 16, 16);
+      const camMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+      cameraMarker = new THREE.Mesh(camGeometry, camMaterial);
+      scene.add(cameraMarker);
+
+
+      const loadGeometry = new THREE.BoxGeometry(1,1,1);
+      const loadMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+      loadMarker = new THREE.Mesh(loadGeometry, loadMaterial);
+     // scene.add(loadMarker);
+
+      animate();
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera3D);
+    }
+
+    function update3DMarkers(tagData, cameraPos) {
+      tagSpheres.forEach(s => scene.remove(s));
+      tagSpheres.length = 0;
+
+      tagData.forEach(tag => {
+
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(1, 12, 12),
+          new THREE.MeshStandardMaterial({ color: 0x00ff00 })
+        );
+        sphere.position.set(tag.pos.x, tag.pos.z, tag.pos.y); // y <-> z
+        scene.add(sphere);
+        tagSpheres.push(sphere);
+      });
+
+      if (cameraPos) {
+        cameraMarker.position.set(cameraPos.x, cameraPos.z, cameraPos.y);
+      }
+
+      const info = tagData.map(tag =>
+        `Tag ${tag.id}: (${tag.pos.x}, ${tag.pos.y}, ${tag.pos.z})m — Dist: ${tag.distance.toFixed(2)}in`
+      ).join("<br>");
+
+      const camInfo = cameraPos
+        ? `<br><b>Camera Position (m):</b><br>X: ${cameraPos.x.toFixed(2)}, Y: ${cameraPos.y.toFixed(2)}, Z: ${cameraPos.z.toFixed(2)}`
+        : "";
+
+      document.getElementById("infoPanel").innerHTML = `<b>Detected Tags:</b><br>${info}${camInfo}`;
+    }
+
+    window.onload = onLoad;
+  </script>
+
+
+
+</body>
+
+
+
+</html>

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ArUco Marker Detection with js-aruco2</title>
+  <style>
+    canvas { border: 1px solid black; }
+  </style>
+</head>
+<body>
+  <video id="video" width="640" height="480" autoplay muted playsinline></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+
+  <!-- Link to locally downloaded aruco.js -->
+  <script src="./js-aruco2-master/src/aruco.js"></script>
+  <script src="./js-aruco2-master/src/cv.js"></script>
+
+  <script src="./js-aruco2-master/src/svd.js"></script> 
+   <script src="./js-aruco2-master/src/dictionaries/utils/dic2opencv.js"></script>
+
+
+
+
+
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    // Access webcam stream
+    navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+      video.srcObject = stream;
+      video.play();
+    }).catch(err => {
+      console.error("Error accessing webcam: ", err);
+    });
+
+    const detector = new AR.Detector();
+
+    // Process each frame from the video
+    function process() {
+      // Draw the current frame from video to the canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Get image data from the canvas (grayscale image)
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // Detect ArUco markers in the image data
+      const markers = detector.detect(imageData);
+
+      // Loop through detected markers
+      markers.forEach(marker => {
+        // Draw the marker's corners
+        ctx.beginPath();
+        ctx.strokeStyle = "lime";
+        marker.corners.forEach((corner, i) => {
+          if (i === 0) {
+            ctx.moveTo(corner.x, corner.y);
+          } else {
+            ctx.lineTo(corner.x, corner.y);
+          }
+        });
+        ctx.closePath();
+        ctx.stroke();
+
+        // Display the marker ID
+        ctx.fillStyle = "red";
+        ctx.fillText(`ID: ${marker.id}`, marker.corners[0].x, marker.corners[0].y - 5);
+      });
+
+      // Call the process function on the next frame
+      requestAnimationFrame(process);
+    }
+
+    // Start processing once video starts playing
+    video.addEventListener("play", () => {
+      requestAnimationFrame(process);
+    });
+  </script>
+</body>
+</html>

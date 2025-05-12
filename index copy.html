@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>React Trilateration App</title>
+  <style>
+    body {
+      margin: 0;
+      user-select: none;
+      font-family: 'Roboto', sans-serif;
+    }
+
+    #canvas {
+      display: none;
+    }
+
+    #threeContainer {
+      margin-left: 20px;
+    }
+
+    #infoPanel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: #fff;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 14px;
+      border: 1px solid #ccc;
+    }
+  </style>
+
+  <!-- React + MUI + Babel -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.21.4/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mui/material@5.10.0/umd/material-ui.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@emotion/react@11.10.5/dist/emotion-react.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@emotion/styled@11.10.5/dist/emotion-styled.umd.min.js"></script>
+
+  <!-- External Libraries -->
+  <script src="js/cv.js"></script>
+  <script src="js/aruco.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <!-- App Script (React + Babel) -->
+  <script type="text/babel" data-type="module" data-presets="env,react">
+    const {
+      Box,
+      Typography,
+      CssBaseline
+    } = MaterialUI;
+
+    function App() {
+      React.useEffect(() => {
+        // All original JS logic from your app goes inside here
+        import('https://unpkg.com/three@0.158.0/build/three.module.js').then(THREE => {
+          // === Declare variables ===
+          let video = document.getElementById("video");
+          let canvas = document.getElementById("canvas");
+          let context = canvas.getContext("2d");
+          let detector = new AR.Detector();
+          let lastCameraPos = { x: 20, y: 12, z: 20 };
+          const smoothingFactor = 0.009;
+
+          const knownTags3D = {
+            1: { x: 0, y: 0, z: 9 },
+            2: { x: 13, y: 0, z: 9 },
+            3: { x: 13, y: 14, z: 9 },
+            4: { x: 0, y: 14, z: 9 },
+            5: { x: 6.5, y: 7, z: 9 }
+          };
+
+          navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+            video.srcObject = stream;
+          });
+
+          // 3D Scene Setup
+          const scene = new THREE.Scene();
+          const camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
+          camera3D.position.set(12, 12, 50);
+          camera3D.lookAt(6.5, 4.5, 7);
+          const renderer = new THREE.WebGLRenderer();
+          renderer.setSize(800, 600);
+          renderer.setClearColor(0xffffff, 1);
+          document.getElementById("threeContainer").appendChild(renderer.domElement);
+
+          const boxGeometry = new THREE.BoxGeometry(13, 9, 14);
+          const boxEdges = new THREE.EdgesGeometry(boxGeometry);
+          const boxMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa });
+          const boxWireframe = new THREE.LineSegments(boxEdges, boxMaterial);
+          boxWireframe.position.set(13 / 2, 9 / 2, 14 / 2);
+          scene.add(boxWireframe);
+
+          const light = new THREE.PointLight(0xffffff, 1, 100);
+          light.position.set(13, 9, 14);
+          scene.add(light);
+
+          const ambient = new THREE.AmbientLight(0xffffff, 0.95);
+          scene.add(ambient);
+
+          const cameraMarker = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 16, 16),
+            new THREE.MeshStandardMaterial({ color: 0xff0000 })
+          );
+          scene.add(cameraMarker);
+
+          const tagSpheres = [];
+
+          function tick() {
+            requestAnimationFrame(tick);
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+              context.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+              const markers = detector.detect(imageData);
+
+              if (markers.length >= 4) {
+                const tagData = markers
+                  .filter(marker => knownTags3D.hasOwnProperty(marker.id))
+                  .slice(0, 4)
+                  .map(marker => {
+                    const id = marker.id;
+                    const pos = knownTags3D[id];
+                    const dist = calculateDistanceFromCamera(marker);
+                    return { id, pos, distance: dist };
+                  });
+
+                if (tagData.length >= 4) {
+                  const cameraPos = trilaterate3D(tagData);
+                  if (cameraPos) {
+                    const smoothedCameraPos = smoothCameraPosition(cameraPos);
+                    update3DMarkers(tagData, smoothedCameraPos);
+                    lastCameraPos = smoothedCameraPos;
+                  }
+                }
+              }
+              renderer.render(scene, camera3D);
+            }
+          }
+
+          tick();
+
+          function calculateDistanceFromCamera(marker) {
+            const REAL_MARKER_SIZE = 5.0;
+            const FOCAL_LENGTH = 1800;
+            const dx = marker.corners[0].x - marker.corners[1].x;
+            const dy = marker.corners[0].y - marker.corners[1].y;
+            const pixelSize = Math.sqrt(dx * dx + dy * dy);
+            const distanceCm = (FOCAL_LENGTH * REAL_MARKER_SIZE) / pixelSize;
+            return distanceCm * 0.393701;
+          }
+
+          function trilaterate3D(tags) {
+            const A = [], b = [];
+            for (let i = 1; i < tags.length; i++) {
+              const P1 = tags[0].pos, Pi = tags[i].pos;
+              const r1 = tags[0].distance, ri = tags[i].distance;
+              A.push([
+                2 * (Pi.x - P1.x),
+                2 * (Pi.y - P1.y),
+                2 * (Pi.z - P1.z)
+              ]);
+              b.push(
+                r1 * r1 - ri * ri - P1.x ** 2 + Pi.x ** 2 - P1.y ** 2 + Pi.y ** 2 - P1.z ** 2 + Pi.z ** 2
+              );
+            }
+
+            const AT = math.transpose(A);
+            const ATA = math.multiply(AT, A);
+            const ATb = math.multiply(AT, b);
+            const pos = math.lusolve(ATA, ATb);
+            return { x: pos[0][0], y: pos[1][0], z: pos[2][0] };
+          }
+
+          function smoothCameraPosition(newPos) {
+            return {
+              x: lastCameraPos.x + smoothingFactor * (newPos.x - lastCameraPos.x),
+              y: lastCameraPos.y + smoothingFactor * (newPos.y - lastCameraPos.y),
+              z: lastCameraPos.z + smoothingFactor * (newPos.z - lastCameraPos.z)
+            };
+          }
+
+          function update3DMarkers(tagData, cameraPos) {
+            tagSpheres.forEach(s => scene.remove(s));
+            tagSpheres.length = 0;
+            tagData.forEach(tag => {
+              const sphere = new THREE.Mesh(
+                new THREE.SphereGeometry(1, 12, 12),
+                new THREE.MeshStandardMaterial({ color: 0x00ff00 })
+              );
+              sphere.position.set(tag.pos.x, tag.pos.z, tag.pos.y);
+              scene.add(sphere);
+              tagSpheres.push(sphere);
+            });
+
+            if (cameraPos) {
+              cameraMarker.position.set(cameraPos.x, cameraPos.z, cameraPos.y);
+            }
+
+            const info = tagData.map(tag =>
+              `Tag ${tag.id}: (${tag.pos.x}, ${tag.pos.y}, ${tag.pos.z})m — Dist: ${tag.distance.toFixed(2)}in`
+            ).join("<br>");
+
+            const camInfo = cameraPos
+              ? `<br><b>Camera Position (m):</b><br>X: ${cameraPos.x.toFixed(2)}, Y: ${cameraPos.y.toFixed(2)}, Z: ${cameraPos.z.toFixed(2)}`
+              : "";
+
+            document.getElementById("infoPanel").innerHTML = `<b>Detected Tags:</b><br>${info}${camInfo}`;
+          }
+        });
+      }, []);
+
+      return (
+        <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center">
+          <CssBaseline />
+          <video id="video" autoPlay playsInline></video>
+          <canvas id="canvas" width="640" height="480"></canvas>
+          <div id="threeContainer"></div>
+          <div id="infoPanel"></div>
+        </Box>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+
+</html>
