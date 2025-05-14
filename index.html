@@ -1,28 +1,22 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-  <title>Camera Position via Trilateration</title>
-  <style>
-    body {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      margin: 0;
-      user-select: none;
-    }
+    <meta charset="UTF-8">
+    <title>Marker Tracker with js-aruco2 and Posit</title>
+    <style>
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
 
-    #canvas-container {
-      text-align: center;
-    }
-  </style>
+        video {
+            display: none;
+        }
+    </style>
 
-  <!-- ArUco + math libraries -->
-  <script src="js/cv.js"></script>
-  <script src="js/aruco.js"></script>
-  <script src="js/mathjs.js"></script>
-  <script type="importmap">
+    <script type="importmap">
     {
       "imports": {
         
@@ -36,486 +30,264 @@
 </head>
 
 <body>
-  <video id="video" autoplay playsinline style="display:none;"></video>
-  <canvas id="canvas" width="640" height="480"></canvas>
-
-  <!-- 3D Scene Container -->
-  <div id="threeContainer" style="margin-left: 20px;"></div>
-
-  <!-- Info Panel UI -->
-  <div id="infoPanel"
-    style="position:absolute; top:10px; left:10px; background:#fff; padding:10px; font-family:monospace; font-size:14px; border:1px solid #ccc;">
-
-    <b>Detected Tags:</b><br>
-    <div id="tagInfo"></div>
-
-    <br>
-    <b>Camera Position (m):</b>
-    <div id="camInfo"></div>
-
-    <hr>
-
-    <!-- NEW: Height selection dropdown -->
-    <label for="heightLevel"><b>Placement Height:</b></label><br>
-    <select id="heightLevel" style="margin-top: 4px; margin-bottom: 10px; width: 100%;">
-      <option value="0">Ground </option>
-      <option value="2">Row 1</option>
-      <option value="5">Row 2</option>
-      <option value="8">Row 3</option>
-    </select>
-
-    <b>Scanned Items:</b>
-    <div id="scannedList"></div>
-  </div>
 
 
-  <!-- Three.js + App Logic -->
-  <script type="module">
-    // import * as THREE from './js/three.js';
 
-    import * as THREE from 'three';
-    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-    import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
 
-    let video,
-      canvas,
-      context,
-      imageData,
-      detector,
-      box,
-      pallet,
-      previousCameraPos = null,
-      scene,
-      camera3D,
-      renderer,
-      cameraMarker,
-      controls,
-      model,
-      sceneTitle = null;
-
-    const placedPallets = {}; // barcode → { pallet, label, line }
-
-    const loaderOBJ = new OBJLoader(),
-      loaderGLTF = new GLTFLoader();
-
-    const knownTags3D = {
-      1: { x: 0, y: 0, z: 9 },
-      2: { x: 13, y: 0, z: 9 },
-      3: { x: 13, y: 14, z: 9 },
-      4: { x: 0, y: 14, z: 9 },
-      5: { x: 6.5, y: 7, z: 9 }
-    };
-
-    const itemScanCounts = {};
-    const labelSprites = [];
-    let scanBuffer = "";
-    let lastScanTime = 0;
-    const barcodeScanDelay = 1000;
-
-    let lastCameraPos = { x: 20, y: 12, z: 20 };
-    const smoothingFactor = 0.007;
-    const tagSpheres = [];
-
-    function onLoad() {
-      video = document.getElementById("video");
-      canvas = document.getElementById("canvas");
-      context = canvas.getContext("2d");
-
-      navigator.mediaDevices
-        .getUserMedia({ video: true })
-        .then(stream => video.srcObject = stream)
-        .catch(err => console.error(err));
-
-      detector = new AR.Detector();
-      init3DScene();
-      requestAnimationFrame(tick);
-    }
-
-    window.addEventListener('keydown', (e) => {
-      const now = Date.now();
-
-      if (now - lastScanTime > barcodeScanDelay) scanBuffer = "";
-      lastScanTime = now;
+    <!-- 3D Scene Container -->
+    <div id="threeContainer" style="margin-left: 20px;"></div>
 
 
-      if (e.key === 'Enter') {
-        handleBarcodeScan(scanBuffer.trim());
-        scanBuffer = "";
-      } else {
-        scanBuffer += e.key;
-        // Remove unwanted characters like Shift, Ctrl, Alt, etc.
-        scanBuffer = scanBuffer.replace(/Shift|Control|Alt|CapsLock/g, '');
-      }
-    });
+    <!-- Load the js-aruco2 modules -->
+     <script type="module">
+        import AR from './js-aruco2-master/src/aruco.js';
+        import POS from './js-aruco2-master/src/posit1.js';
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-    function handleBarcodeScan(code) {
-      if (!itemScanCounts[code]) {
-        itemScanCounts[code] = 1;
-        console.log(`Scanned "${code}" once.`);
-      } else {
-        itemScanCounts[code]++;
-        const selectedZ = parseFloat(document.getElementById("heightLevel").value);
-        const palletPosition = new THREE.Vector3(lastCameraPos.x, selectedZ, lastCameraPos.y);
-        const labelOffset = new THREE.Vector3(2, 3, 0);
-        const labelPosition = new THREE.Vector3().addVectors(palletPosition, labelOffset);
+        const { Posit } = POS;
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
 
-        if (itemScanCounts[code] === 2) {
-          console.log(`Second scan for "${code}". Placing object.`);
+        const markerSize = 0.041; // meters
+        let posit;
 
-          loaderOBJ.load('./pallet.obj', function (obj) {
-            obj.scale.setScalar(1.5);
-            obj.position.copy(palletPosition);
-            scene.add(obj);
+        const addedMarkers = new Map(); // markerId -> { mesh, position }
+        const targetQueue = [];
+        let currentTarget = null;
+        let cooldown = false;
+        const cooldownTime = 30; // milliseconds
 
-            const label = createTextLabel(code, labelPosition).sprite;
-            label.position.copy(labelPosition);
-            scene.add(label);
+        let scene, camera3D, renderer, controls, cameraMarker;
+        const labelSprites = [];
+        const loaderGLTF = new GLTFLoader();
 
-            const points = [palletPosition, labelPosition];
-            const geometry = new THREE.BufferGeometry().setFromPoints(points);
-            const material = new THREE.LineBasicMaterial({ color: 0xffffff });
-            const line = new THREE.Line(geometry, material);
-            scene.add(line);
+        const moveSpeed = 0.01;  // meters/frame
+        const turnSpeed = 0.05;  // radians/frame
 
-            labelSprites.push(label);
+        navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                posit = new Posit(markerSize, canvas.width);
+                requestAnimationFrame(tick);
+            };
+        });
 
-            placedPallets[code] = { pallet: obj, label, line };
-          });
+        const config = { dictionaryName: 'ARUCO' };
+        const detector = new AR.Detector(config);
 
-        } else {
-          console.log(`Moving existing "${code}" to new position.`);
+        function tick() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const markers = detector.detect(imageData);
 
-          const obj = placedPallets[code];
-          if (obj) {
-            obj.pallet.position.copy(palletPosition);
+            for (const marker of markers) {
+                drawCorners(marker.corners);
+                const pose = posit.pose(marker.corners);
+                if (!pose) continue;
 
-            const newLabelPos = new THREE.Vector3().addVectors(palletPosition, labelOffset);
-            obj.label.position.copy(newLabelPos);
+                const { R: Rc, T: Tc } = invertPose(pose.bestRotation, pose.bestTranslation);
+                const camWorld = transformToWorld(
+                    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                    [0, 0, 0],
+                    Rc, Tc
+                );
+                camWorld[1] = 0; // force to ground
 
-            // Update line geometry
-            const newPoints = [palletPosition, newLabelPos];
-            obj.line.geometry.dispose();
-            obj.line.geometry = new THREE.BufferGeometry().setFromPoints(newPoints);
+                const posVec = new THREE.Vector3(...camWorld);
 
-            // Update label texture with new location
-            const newLabel = createTextLabel(code, newLabelPos).sprite;
-            obj.label.material.map.dispose(); // cleanup
-            obj.label.material.map = newLabel.material.map;
-          }
+                if (!addedMarkers.has(marker.id)) {
+                    const mesh = createCylinder();
+                    mesh.position.copy(posVec);
+                    scene.add(mesh);
 
-          //itemScanCounts[code] = 2; // Reset to allow repeated moves
-        }
-      }
+                    addedMarkers.set(marker.id, { mesh, position: posVec.clone() });
 
-      updateScannedItemsDisplay();
-    }
+                    // Prioritize markers based on distance (or ID if you prefer)
+                    const sortedByDistance = [...addedMarkers.values()]
+                        .sort((a, b) => a.position.distanceTo(cameraMarker.position) - b.position.distanceTo(cameraMarker.position))
+                        .map(obj => obj.position);
 
-    function updateScannedItemsDisplay() {
-      const scannedListHTML = Object.keys(itemScanCounts)
-        .map(code => `<li>${code}: ${itemScanCounts[code]} scan(s)</li>`)
-        .join('');
-      document.getElementById("scannedList").innerHTML = `<ul>${scannedListHTML}</ul>`;
-    }
+                    targetQueue.length = 0;
+                    targetQueue.push(...sortedByDistance);
 
-    function createTextLabel(text, position = new THREE.Vector3(0, 0, 0)) {
-      const dpi = window.devicePixelRatio || 1;
-      const width = 512;
-      const height = 160;
+                } else {
+                    const markerObj = addedMarkers.get(marker.id);
+                    markerObj.position.copy(posVec);
 
-      const canvas = document.createElement('canvas');
-      canvas.width = width * dpi;
-      canvas.height = height * dpi;
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
+                    // Re-target immediately if marker is near
+                    if (cameraMarker && cameraMarker.position.distanceTo(posVec) > 0.05) {
+                        currentTarget = posVec.clone();
+                    }
+                }
 
-      const ctx = canvas.getContext('2d');
-      ctx.scale(dpi, dpi);
-
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-      ctx.fillRect(0, 0, width, height);
-      ctx.strokeStyle = 'white';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(0, 0, width, height);
-
-      ctx.fillStyle = 'white';
-      ctx.font = 'bold 32px Arial';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      const posText = `X: ${position.x.toFixed(1)}, Y: ${position.y.toFixed(1)}, Z: ${position.z.toFixed(1)}`;
-
-      ctx.fillText(`Item: ${text}`, width / 2, 50);
-      ctx.fillText(posText, width / 2, 110);
-
-      const texture = new THREE.CanvasTexture(canvas);
-      const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-      const sprite = new THREE.Sprite(material);
-      sprite.scale.set(6, 2, 1); // size in 3D units
-
-
-      const sprite1 = new THREE.Sprite(material);
-      sprite1.scale.set(5, 1.5, 1); // Adjust size
-      sprite1.position.copy(position);
-
-      return { sprite, sprite1 };
-    }
-
-    function updateSceneTitle(centerId) {
-      alert(centerId)
-      if (sceneTitle) {
-        scene.remove(sceneTitle);
-        sceneTitle.material.map.dispose(); // Clean up texture
-      }
-
-      const labelText = `Scene Center: ID ${centerId}`;
-      sceneTitle = createTextLabel(labelText, new THREE.Vector3(6.5, 12, 7)).sprite1; // Adjust position as needed
-      scene.add(sceneTitle);
-    }
-
-    function smoothCameraPosition(newPos) {
-      return {
-        x: lastCameraPos.x + smoothingFactor * (newPos.x - lastCameraPos.x),
-        y: lastCameraPos.y + smoothingFactor * (newPos.y - lastCameraPos.y),
-        z: 1
-      };
-    }
-
-    function tick() {
-      requestAnimationFrame(tick);
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
-        imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-        const markers = detector.detect(imageData);
-        drawCorners(markers);
-        drawIds(markers);
-
-        if (markers.length >= 4) {
-          const tagData = markers
-            .filter(marker => knownTags3D.hasOwnProperty(marker.id))
-            .slice(0, 4)
-            .map(marker => ({
-              id: marker.id,
-              pos: knownTags3D[marker.id],
-              distance: calculateDistanceFromCamera(marker)
-            }));
-
-          if (tagData.length >= 4) {
-            const cameraPos = trilaterate3D(tagData);
-            if (cameraPos) {
-              const smoothedCameraPos = smoothCameraPosition(cameraPos);
-              update3DMarkers(tagData, smoothedCameraPos);
-              lastCameraPos = smoothedCameraPos;
+                break; // Only use the first visible marker per frame
             }
-          }
-        }
-      }
-    }
 
-    function drawCorners(markers) {
-      context.lineWidth = 3;
-      context.strokeStyle = "red";
-      markers.forEach(marker => {
-        context.beginPath();
-        for (let j = 0; j < marker.corners.length; j++) {
-          const c1 = marker.corners[j];
-          const c2 = marker.corners[(j + 1) % marker.corners.length];
-          context.moveTo(c1.x, c1.y);
-          context.lineTo(c2.x, c2.y);
-        }
-        context.stroke();
-      });
-    }
+            // Only use the first target in the queue
+            if (!currentTarget && targetQueue.length > 0) {
+                currentTarget = targetQueue.shift();
+                targetQueue.push(currentTarget); // loop through all markers
+            }
 
-    function drawIds(markers) {
-      context.fillStyle = "blue";
-      context.font = "20px monospace";
-      markers.forEach(marker => {
-        const x = Math.min(...marker.corners.map(c => c.x));
-        const y = Math.min(...marker.corners.map(c => c.y));
-        context.fillText(marker.id, x, y);
-        if (marker.id >= 5) {
-          context.fillStyle = "green";
-          context.fillText("Center", x + 10, y + 10);
-        }
-      });
-    }
-
-    function calculateDistanceFromCamera(marker) {
-      const REAL_MARKER_SIZE = 1.5; // cm
-      const FOCAL_LENGTH = 1300;    // px
-      const dx = marker.corners[0].x - marker.corners[1].x;
-      const dy = marker.corners[0].y - marker.corners[1].y;
-      const pixelSize = Math.sqrt(dx * dx + dy * dy);
-      const distanceCm = (FOCAL_LENGTH * REAL_MARKER_SIZE) / pixelSize;
-      return distanceCm * 0.393701; // inches
-    }
-
-    function trilaterate3D(tags) {
-      if (tags.length < 4) return null;
-      const A = [], b = [];
-      for (let i = 1; i < tags.length; i++) {
-        const P1 = tags[0].pos;
-        const Pi = tags[i].pos;
-        const r1 = tags[0].distance;
-        const ri = tags[i].distance;
-        A.push([2 * (Pi.x - P1.x), 2 * (Pi.y - P1.y), 2 * (Pi.z - P1.z)]);
-        b.push(
-          r1 * r1 - ri * ri
-          - P1.x * P1.x + Pi.x * Pi.x
-          - P1.y * P1.y + Pi.y * Pi.y
-          - P1.z * P1.z + Pi.z * Pi.z
-        );
-      }
-      const AT = math.transpose(A);
-      const ATA = math.multiply(AT, A);
-      const ATb = math.multiply(AT, b);
-      const pos = math.lusolve(ATA, ATb);
-      return { x: pos[0][0], y: pos[1][0], z: pos[2][0] };
-    }
-
-    function init3DScene() {
-      scene = new THREE.Scene();
-      const axesHelper = new THREE.AxesHelper(3);
-      axesHelper.position.set(6.5, 0, 7);
-      scene.add(axesHelper);
-
-      camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
-      camera3D.position.set(12, 12, 20);
-      camera3D.lookAt(6.5, 4.5, 7);
-
-      renderer = new THREE.WebGLRenderer();
-      renderer.setSize(800, 600);
-      renderer.setClearColor(0xffffff); // Set background to white
-      document.getElementById("threeContainer").appendChild(renderer.domElement);
-
-
-      const boxGeometry = new THREE.BoxGeometry(13, 9, 14);
-      const boxEdges = new THREE.EdgesGeometry(boxGeometry);
-      const boxMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa });
-      const boxWireframe = new THREE.LineSegments(boxEdges, boxMaterial);
-      boxWireframe.position.set(13 / 2, 9 / 2, 14 / 2);
-      scene.add(boxWireframe);
-
-      const gridHelper = new THREE.GridHelper(20, 20);
-      gridHelper.position.set(6.5, 0, 7);
-      scene.add(gridHelper);
-
-      const light = new THREE.PointLight(0xffffff, 1, 100);
-      light.position.set(13, 9, 14);
-      scene.add(light);
-
-      const ambient = new THREE.AmbientLight(0xffffff, 0.95);
-      scene.add(ambient);
-
-      loaderGLTF.load('./forklift.gltf', function (gltf) {
-        cameraMarker = gltf.scene;
-        cameraMarker.scale.setScalar(2);
-        cameraMarker.position.set(0, 1, 0);
-        scene.add(cameraMarker);
-
-      });
-
-      // Initialize OrbitControls after the camera and renderer
-      controls = new OrbitControls(camera3D, renderer.domElement);
-      controls.enableDamping = true; // For smooth motion
-      controls.dampingFactor = 0.05;
-      controls.screenSpacePanning = false;
-      controls.minDistance = 5;
-      controls.maxDistance = 100;
-      controls.maxPolarAngle = Math.PI / 2; // Prevent camera from going under the scene
-
-      animate();
-
-    }
-
-    function animate() {
-      requestAnimationFrame(animate);
-
-      labelSprites.forEach(sprite => {
-        sprite.lookAt(camera3D.position);
-      });
-
-      // Update OrbitControls (important for damping to work)
-      controls.update();
-      renderer.render(scene, camera3D);
-    }
-
-    function update3DMarkers(tagData, cameraPos) {
-      tagSpheres.forEach(s => scene.remove(s));
-      tagSpheres.length = 0;
-
-
-      const centerTag = tagData.find(tag => tag.id >= 5); // Customize logic if needed
-
-      if (centerTag) {
-        updateSceneTitle(centerTag.id);
-      }
-
-      tagData.forEach(tag => {
-        // Sphere
-        const sphere = new THREE.Mesh(
-          new THREE.SphereGeometry(1, 12, 12),
-          new THREE.MeshStandardMaterial({ color: 0x00ff00 })
-        );
-        sphere.position.set(tag.pos.x, tag.pos.z, tag.pos.y);
-        scene.add(sphere);
-        tagSpheres.push(sphere);
-
-        // Label
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        context.font = '24px Arial';
-        context.fillStyle = 'black';
-        context.fillText(`ID: ${tag.id}`, 2, 24);
-
-        const texture = new THREE.CanvasTexture(canvas);
-        const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
-        const sprite = new THREE.Sprite(spriteMaterial);
-        sprite.position.set(tag.pos.x, tag.pos.z + 1.5, tag.pos.y);
-        sprite.scale.set(5, 2.5, 1); // adjust as needed
-
-        scene.add(sprite);
-        tagSpheres.push(sprite);
-      });
-
-      if (cameraPos) {
-        // Move the model to the new position
-        cameraMarker.position.set(cameraPos.x, 1, cameraPos.y);
-
-        // Rotate the model in direction of motion
-        if (previousCameraPos) {
-          const dir = new THREE.Vector3(
-            cameraPos.x - previousCameraPos.x,
-            cameraPos.z - previousCameraPos.z,
-            cameraPos.y - previousCameraPos.y
-          );
-          if (dir.lengthSq() > 0.0001) { // avoid zero-length
-            dir.normalize();
-
-            // Make model face in the direction of movement
-            const targetQuaternion = new THREE.Quaternion();
-            const forward = new THREE.Vector3(0, 0, 1); // default model forward direction
-            targetQuaternion.setFromUnitVectors(forward, dir);
-            cameraMarker.quaternion.slerp(targetQuaternion, 0.2); // smooth transition
-          }
+            requestAnimationFrame(tick);
         }
 
-        // Save this position for the next frame
-        previousCameraPos = { ...cameraPos };
+        function drawCorners(corners) {
+            ctx.beginPath();
+            for (let i = 0; i < corners.length; i++) {
+                const c = corners[i];
+                ctx.lineTo(c.x, c.y);
+            }
+            ctx.closePath();
+            ctx.strokeStyle = "lime";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
 
-        // Update UI
-        document.getElementById("camInfo").innerHTML = `X: ${cameraPos.x.toFixed(2)}<br>Y: ${cameraPos.y.toFixed(2)}<br>Z: ${cameraPos.z.toFixed(2)}`;
-      }
+        function transformToWorld(Rm, Tm, Rc, Tc) {
+            return [
+                Rm[0][0] * Tc[0] + Rm[0][1] * Tc[1] + Rm[0][2] * Tc[2] + Tm[0],
+                Rm[1][0] * Tc[0] + Rm[1][1] * Tc[1] + Rm[1][2] * Tc[2] + Tm[1],
+                Rm[2][0] * Tc[0] + Rm[2][1] * Tc[1] + Rm[2][2] * Tc[2] + Tm[2]
+            ];
+        }
 
-      const info = tagData.map(tag =>
-        `Tag ${tag.id}: (${tag.pos.x}, ${tag.pos.y}, ${tag.pos.z}) — Dist: ${tag.distance.toFixed(2)}in`
-      ).join("<br>");
-      document.getElementById("tagInfo").innerHTML = info;
-    }
+        function invertPose(R, T) {
+            const Rt = R[0].map((_, colIndex) => R.map(row => row[colIndex]));
+            const Tinv = [
+                -(Rt[0][0] * T[0] + Rt[0][1] * T[1] + Rt[0][2] * T[2]),
+                -(Rt[1][0] * T[0] + Rt[1][1] * T[1] + Rt[1][2] * T[2]),
+                -(Rt[2][0] * T[0] + Rt[2][1] * T[1] + Rt[2][2] * T[2])
+            ];
+            return { R: Rt, T: Tinv };
+        }
 
-    window.onload = onLoad;
-  </script>
+        function createCylinder() {
+            const radius = 0.1524; // 12 inches in meters / 2
+            const height = 0.05;
+            const geo = new THREE.CylinderGeometry(radius, radius, height, 32);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+            return new THREE.Mesh(geo, mat);
+        }
+
+        function init3DScene() {
+            scene = new THREE.Scene();
+
+            const axesHelper = new THREE.AxesHelper(3);
+            axesHelper.position.set(6.5, 0, 7);
+            scene.add(axesHelper);
+
+            camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
+            camera3D.position.set(12, 12, 20);
+            camera3D.lookAt(6.5, 4.5, 7);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(800, 600);
+            renderer.setClearColor(0xffffff);
+            document.getElementById("threeContainer").appendChild(renderer.domElement);
+
+            const box = new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(13, 9, 14));
+            const boxHelper = new THREE.Box3Helper(box, 0xaaaaaa);
+            scene.add(boxHelper);
+
+            const gridHelper = new THREE.GridHelper(20, 20);
+            gridHelper.position.set(6.5, 0, 7);
+            scene.add(gridHelper);
+
+            const light = new THREE.PointLight(0xffffff, 1, 100);
+            light.position.set(13, 9, 14);
+            scene.add(light);
+
+            const ambient = new THREE.AmbientLight(0xffffff, 0.95);
+            scene.add(ambient);
+
+            loaderGLTF.load('./forklift.gltf', function (gltf) {
+                cameraMarker = gltf.scene;
+                cameraMarker.scale.set(2, 2, 2);
+                scene.add(cameraMarker);
+            });
+
+            controls = new OrbitControls(camera3D, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 5;
+            controls.maxDistance = 100;
+            controls.maxPolarAngle = Math.PI / 2;
+
+            animate();
+        }
+
+        let targetLine = null;
+
+        function updateTargetLine() {
+            if (targetLine) {
+                scene.remove(targetLine);
+                targetLine.geometry.dispose();
+                targetLine.material.dispose();
+                targetLine = null;
+            }
+
+            if (cameraMarker && currentTarget) {
+                const points = [
+                    cameraMarker.position.clone().add(new THREE.Vector3(0, 0.5, 0)),
+                    currentTarget.clone().add(new THREE.Vector3(0, 0.5, 0))
+                ];
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                const material = new THREE.LineBasicMaterial({ color: 0x0000ff });
+                targetLine = new THREE.Line(geometry, material);
+                scene.add(targetLine);
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (cameraMarker && currentTarget) {
+                const modelPos = cameraMarker.position;
+                const direction = new THREE.Vector3().subVectors(currentTarget, modelPos);
+                direction.y = 0;
+
+                const distance = direction.length();
+
+                if (distance > 0.05 && !cooldown) {
+                    cooldown = true;
+                    setTimeout(() => cooldown = false, cooldownTime);
+
+                    const targetAngle = Math.atan2(direction.x, direction.z);
+                    const currentAngle = cameraMarker.rotation.y;
+                    let angleDiff = targetAngle - currentAngle;
+
+                    angleDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
+                    cameraMarker.rotation.y += THREE.MathUtils.clamp(angleDiff, -turnSpeed, turnSpeed);
+
+                    if (Math.abs(angleDiff) < 0.3) {
+                        const forward = new THREE.Vector3(
+                            Math.sin(cameraMarker.rotation.y),
+                            0,
+                            Math.cos(cameraMarker.rotation.y)
+                        );
+                        forward.multiplyScalar(moveSpeed);
+                        cameraMarker.position.add(forward);
+                    }
+                }
+            }
+
+            updateTargetLine();
+            controls.update();
+            renderer.render(scene, camera3D);
+        }
+
+        init3DScene();
+    </script>
+
+
 </body>
 
 </html>
