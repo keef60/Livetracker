@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Marker Tracker with js-aruco2 and Posit</title>
+    <style>
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        video {
+            display: none;
+        }
+
+        #followBtn {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        #followBtn:hover {
+            background-color: #0056b3;
+        }
+    </style>
+
+    <script type="importmap">
+    {
+      "imports": {
+        
+        "three": "./three.js-dev/build/three.module.js",
+        "three/webgpu": "./three.js-dev/build/three.webgpu.js",
+        "three/tsl": "./three.js-dev/build/three.tsl.js",
+        "three/addons/": "./three.js-dev/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+
+<body>
+
+
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+
+    <!-- 3D Scene Container -->
+    <button id="followBtn">Follow CameraMarker</button>
+
+    <div id="threeContainer" style="margin-left: 20px; ;"></div>
+
+
+    <!-- Load the js-aruco2 modules -->
+    <script type="module">
+        import AR from './js-aruco2-master/src/aruco.js';
+        import POS from './js-aruco2-master/src/posit1.js';
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        const { Posit } = POS;
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        const markerSize = 0.165;
+        let posit;
+
+        const addedMarkers = new Map();
+        const targetQueue = [];
+        let currentTarget = null;
+        let cooldown = false;
+        const cooldownTime = 3; // milliseconds
+        let scene, camera3D, renderer, controls, cameraMarker;
+        let statusLabel = null;
+        const loaderGLTF = new GLTFLoader();
+
+        const moveSpeed = 0.04;
+        const turnSpeed = 0.05;
+        const markerPixelSizes = new Map();
+
+        const markerSizeHistory = new Map();
+        const zHistory = new Map();
+        const MAX_HISTORY = 5;
+
+        const distanceHistory = [];
+        const distanceWindowSize = 5; // Number of frames to observe
+
+        navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                posit = new Posit(markerSize, canvas.width);
+                requestAnimationFrame(tick);
+            };
+        });
+
+        let followMode = false;
+
+        document.getElementById('followBtn').addEventListener('click', () => {
+            followMode = !followMode;
+            document.getElementById('followBtn').innerText = followMode ? "Stop Following" : "Follow CameraMarker";
+        });
+
+
+        const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
+
+        function markerSizeInPixels(corners) {
+            let size = 0;
+            for (let i = 0; i < corners.length; i++) {
+                const c1 = corners[i];
+                const c2 = corners[(i + 1) % corners.length];
+                size += Math.hypot(c2.x - c1.x, c2.y - c1.y);
+            }
+            return size;
+        }
+
+        function updateHistory(map, markerId, newValue) {
+            const history = map.get(markerId) || [];
+            history.push(newValue);
+            if (history.length > MAX_HISTORY) history.shift();
+            map.set(markerId, history);
+            return history;
+        }
+
+        function smoothVector(current, previous, alpha = 0.2) {
+            return new THREE.Vector3(
+                previous.x + alpha * (current.x - previous.x),
+                previous.y + alpha * (current.y - previous.y),
+                previous.z + alpha * (current.z - previous.z)
+            );
+        }
+
+        function createTextLabel(text, color = '#000000') {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = color;
+            ctx.font = '24px Arial';
+            ctx.fillText(text, 10, 40);
+            const texture = new THREE.CanvasTexture(canvas);
+            const material = new THREE.SpriteMaterial({ map: texture });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(1.5, 0.4, 1);
+            return sprite;
+        }
+
+        function createCylinder(markerId) {
+            const radius = 0.1524;
+            const height = 5;
+            const geo = new THREE.CylinderGeometry(radius, radius, height, 32);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+            const mesh = new THREE.Mesh(geo, mat);
+
+            const label = createTextLabel(`ID: ${markerId}`, 'blue');
+            label.position.set(0, height / 2 + 0.5, 0);
+            mesh.add(label);
+
+            return mesh;
+        }
+
+        function getMarkerTrend() {
+            if (distanceHistory.length < distanceWindowSize) return 'neutral';
+
+            let decreasing = 0;
+            let increasing = 0;
+
+            for (let i = 1; i < distanceHistory.length; i++) {
+                if (distanceHistory[i] < distanceHistory[i - 1]) decreasing++;
+                if (distanceHistory[i] > distanceHistory[i - 1]) increasing++;
+            }
+
+                        console.log ( (decreasing >= 3) ? 'approaching':'', (increasing >= 3) ? 'reversing':'');
+
+            if (decreasing >= 3) return 'approaching';
+            if (increasing >= 3) return 'reversing';
+            return 'neutral';
+        }
+
+        function tick() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const markers = detector.detect(imageData);
+
+            for (const marker of markers) {
+                drawCorners(marker.corners);
+
+                const pixelSize = markerSizeInPixels(marker.corners);
+                updateHistory(markerSizeHistory, marker.id, pixelSize);
+
+                const pose = posit.pose(marker.corners);
+                if (!pose) continue;
+
+                updateHistory(zHistory, marker.id, pose.bestTranslation[2]);
+
+                const { R: Rc, T: Tc } = invertPose(pose.bestRotation, pose.bestTranslation);
+                const camWorld = transformToWorld(
+                    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                    [0, 0, 0],
+                    Rc, Tc
+                );
+                camWorld[1] = 2; // force to ground height
+                const posVec = new THREE.Vector3(...camWorld);
+
+                if (!addedMarkers.has(marker.id)) {
+                    const mesh = createCylinder(marker.id);
+                    mesh.position.copy(posVec);
+                    scene.add(mesh);
+                    addedMarkers.set(marker.id, { mesh, position: posVec.clone() });
+                } else {
+                    const markerObj = addedMarkers.get(marker.id);
+                    markerObj.position.copy(posVec);
+                }
+
+                // Set the marker as the current live target
+                currentTarget = posVec.clone();
+                markerSizeHistory.set('current', markerSizeHistory.get(marker.id));
+                zHistory.set('current', zHistory.get(marker.id));
+
+                break; // Only process the first visible marker per frame
+            }
+
+            requestAnimationFrame(tick);
+        }
+
+        function drawCorners(corners) {
+            ctx.beginPath();
+            for (let i = 0; i < corners.length; i++) {
+                const c = corners[i];
+                ctx.lineTo(c.x, c.y);
+            }
+            ctx.closePath();
+            ctx.strokeStyle = "lime";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function transformToWorld(Rm, Tm, Rc, Tc) {
+            return [
+                Rm[0][0] * Tc[0] + Rm[0][1] * Tc[1] + Rm[0][2] * Tc[2] + Tm[0],
+                Rm[1][0] * Tc[0] + Rm[1][1] * Tc[1] + Rm[1][2] * Tc[2] + Tm[1],
+                Rm[2][0] * Tc[0] + Rm[2][1] * Tc[1] + Rm[2][2] * Tc[2] + Tm[2]
+            ];
+        }
+
+        function invertPose(R, T) {
+            const Rt = R[0].map((_, colIndex) => R.map(row => row[colIndex]));
+            const Tinv = [
+                -(Rt[0][0] * T[0] + Rt[0][1] * T[1] + Rt[0][2] * T[2]),
+                -(Rt[1][0] * T[0] + Rt[1][1] * T[1] + Rt[1][2] * T[2]),
+                -(Rt[2][0] * T[0] + Rt[2][1] * T[1] + Rt[2][2] * T[2])
+            ];
+            return { R: Rt, T: Tinv };
+        }
+
+        function init3DScene() {
+            scene = new THREE.Scene();
+            const axesHelper = new THREE.AxesHelper(3);
+            axesHelper.position.set(6.5, 0, 7);
+            scene.add(axesHelper);
+
+            camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
+            camera3D.position.set(12, 12, 20);
+            camera3D.lookAt(6.5, 4.5, 7);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(800, 600);
+            renderer.setClearColor(0xffffff);
+            document.getElementById("threeContainer").appendChild(renderer.domElement);
+
+            scene.add(new THREE.Box3Helper(new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(13, 9, 14)), 0xaaaaaa));
+            const gridHelper = new THREE.GridHelper(20, 20);
+            gridHelper.position.set(6.5, 0, 7);
+            scene.add(gridHelper);
+            // scene.add(new THREE.PointLight(0xffffff, 1, 100).position.set(13, 9, 14));
+            scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+
+            loaderGLTF.load('./forklift.gltf', function (gltf) {
+                cameraMarker = gltf.scene;
+                cameraMarker.scale.setScalar(0.5);
+                scene.add(cameraMarker);
+            });
+
+            controls = new OrbitControls(camera3D, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 5;
+            controls.maxDistance = 100;
+            controls.maxPolarAngle = Math.PI / 2;
+
+            animate();
+        }
+
+        let targetLine = null;
+
+        function updateTargetLine() {
+            if (targetLine) {
+                scene.remove(targetLine);
+                targetLine.geometry.dispose();
+                targetLine.material.dispose();
+            }
+            if (cameraMarker && currentTarget) {
+                const points = [
+                    cameraMarker.position.clone().add(new THREE.Vector3(0, 0.5, 0)),
+                    currentTarget.clone().add(new THREE.Vector3(0, 0.5, 0))
+                ];
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                const material = new THREE.LineBasicMaterial({ color: 0x0000ff });
+                targetLine = new THREE.Line(geometry, material);
+                scene.add(targetLine);
+            }
+        }
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (cameraMarker && currentTarget) {
+                const modelPos = cameraMarker.position;
+                const direction = new THREE.Vector3().subVectors(currentTarget, modelPos);
+                direction.y = 0;
+                const distance = direction.length();
+
+                // 🔁 Track distance history
+                distanceHistory.push(distance);
+                if (distanceHistory.length > distanceWindowSize) {
+                    distanceHistory.shift();
+                }
+
+                const trend = getMarkerTrend(); // 'approaching', 'reversing', or 'neutral'
+
+                const targetAngle = Math.atan2(direction.x, direction.z);
+                let angleDiff = targetAngle - cameraMarker.rotation.y;
+                angleDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
+
+                // Old shrink detection (optional, now less relevant)
+                const sizeTrend = markerSizeHistory.get('current') || [];
+                const zTrend = zHistory.get('current') || [];
+                const isMarkerShrinking = (
+                    sizeTrend.length >= 2 &&
+                    zTrend.length >= 2 &&
+                    sizeTrend.at(-1) < sizeTrend.at(-2) * 0.98 &&
+                    zTrend.at(-1) > zTrend.at(-2) * 1.02
+                );
+
+                // 🏷️ Add or update status label
+                if (!statusLabel) {
+                    statusLabel = createTextLabel('', 'red');
+                    statusLabel.position.set(0, 2.5, 0);
+                    cameraMarker.add(statusLabel);
+                }
+
+                const ctx = statusLabel.material.map.image.getContext('2d');
+                ctx.clearRect(0, 0, 256, 64);
+                ctx.fillStyle = 'red';
+                ctx.font = '24px Arial';
+                ctx.fillText(
+                    trend === 'reversing' ? "Reversing" :
+                        trend === 'approaching' ? "Approaching" :
+                            "Waiting",
+                    10, 40
+                );
+                statusLabel.material.map.needsUpdate = true;
+
+                // 🚗 Movement logic: Only move if there's a trend and cooldown is off
+                if (distance > 0.05 && trend !== 'neutral') {
+                    cooldown = true;
+                    setTimeout(() => cooldown = false, cooldownTime);
+
+                    if (trend === 'reversing') {
+                        const back = new THREE.Vector3(
+                            -Math.sin(cameraMarker.rotation.y),
+                            0,
+                            -Math.cos(cameraMarker.rotation.y)
+                        );
+                        cameraMarker.position.add(back.multiplyScalar(moveSpeed));
+                    } else if (trend === 'approaching') {
+                        cameraMarker.rotation.y += THREE.MathUtils.clamp(angleDiff, -turnSpeed, turnSpeed);
+                        if (Math.abs(angleDiff) < 0.3) {
+                            const forward = new THREE.Vector3(
+                                Math.sin(cameraMarker.rotation.y),
+                                0,
+                                Math.cos(cameraMarker.rotation.y)
+                            );
+                            const dynamicSpeed = moveSpeed * (Math.min(distance, 1)); // Slows as it nears
+                            cameraMarker.position.add(forward.multiplyScalar(dynamicSpeed));
+                        }
+                    }
+                }
+            }
+
+            // 🎥 Follow mode camera movement
+            if (followMode && cameraMarker) {
+                const offsetDistance = 2;
+                const heightOffset = 1;
+
+                const markerDirection = new THREE.Vector3(
+                    -Math.sin(cameraMarker.rotation.y),
+                    0,
+                    -Math.cos(cameraMarker.rotation.y)
+                );
+
+                const followPosition = new THREE.Vector3().copy(cameraMarker.position)
+                    .add(markerDirection.multiplyScalar(offsetDistance))
+                    .setY(cameraMarker.position.y + heightOffset);
+
+                camera3D.position.lerp(followPosition, 0.1);
+                camera3D.lookAt(cameraMarker.position);
+            }
+
+            // 🧭 Update controls and render
+            if (cameraMarker) {
+                controls.target.copy(cameraMarker.position);
+            }
+
+            controls.update();
+            renderer.render(scene, camera3D);
+        }
+
+        init3DScene();
+    </script>
+
+
+
+</body>
+
+</html>

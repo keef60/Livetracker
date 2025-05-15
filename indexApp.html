@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Forklift Grid AR Tracker</title>
+    <style>
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        video {
+            display: none;
+        }
+
+        #followBtn {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        #followBtn:hover {
+            background-color: #0056b3;
+        }
+    </style>
+    <script type="importmap">
+    {
+      "imports": {
+        
+        "three": "./three.js-dev/build/three.module.js",
+        "three/webgpu": "./three.js-dev/build/three.webgpu.js",
+        "three/tsl": "./three.js-dev/build/three.tsl.js",
+        "three/addons/": "./three.js-dev/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+
+<body>
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <button id="followBtn">Follow CameraMarker</button>
+    <div id="threeContainer"></div>
+
+    <!-- Info Panel UI -->
+    <div id="infoPanel"
+        style="position:absolute; top:10px; left:10px; background:#fff; padding:10px; font-family:monospace; font-size:14px; border:1px solid #ccc;">
+
+        <b>Detected Tags:</b><br>
+        <div id="tagInfo"></div>
+
+        <br>
+        <b>Camera Position (m):</b>
+        <div id="camInfo"></div>
+
+        <hr>
+
+        <!-- NEW: Height selection dropdown -->
+        <label for="heightLevel"><b>Placement Height:</b></label><br>
+        <select id="heightLevel" style="margin-top: 4px; margin-bottom: 10px; width: 100%;">
+            <option value="0">Ground </option>
+            <option value="2">Row 1</option>
+            <option value="5">Row 2</option>
+            <option value="8">Row 3</option>
+        </select>
+
+        <b>Scanned Items:</b>
+        <div id="scannedList"></div>
+    </div>
+
+    <script type="module">
+        import AR from './js-aruco2-master/src/aruco.js';
+        import POS from './js-aruco2-master/src/posit1.js';
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+        const { Posit } = POS;
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        const markerSize = 0.165;
+        let posit;
+
+        const addedMarkers = new Map();
+        const markerSizeHistory = new Map();
+        const zHistory = new Map();
+        const distanceHistory = [];
+        const MAX_HISTORY = 5;
+        const distanceWindowSize = 5;
+
+        let scene, camera3D, renderer, controls, cameraMarker;
+        let followMode = false;
+        let currentTarget = null;
+        let cooldown = false;
+        let statusLabel = null;
+        const cooldownTime = 3;
+        const moveSpeed = 0.04;
+        const turnSpeed = 0.05;
+
+        const placedPallets = {}; // barcode → { pallet, label, line }
+
+        const loaderOBJ = new OBJLoader()
+        const itemScanCounts = {};
+        const labelSprites = [];
+        let scanBuffer = "";
+        let lastScanTime = 0;
+        const barcodeScanDelay = 1000;
+        let lastCameraPos = { x: 0, y: 0, z: 1 };
+        const loaderGLTF = new GLTFLoader();
+
+        document.getElementById('followBtn').addEventListener('click', () => {
+            followMode = !followMode;
+            document.getElementById('followBtn').innerText = followMode ? "Stop Following" : "Follow CameraMarker";
+        });
+
+        window.addEventListener('keydown', (e) => {
+            const now = Date.now();
+
+            if (now - lastScanTime > barcodeScanDelay) scanBuffer = "";
+            lastScanTime = now;
+
+
+            if (e.key === 'Enter') {
+                handleBarcodeScan(scanBuffer.trim());
+                scanBuffer = "";
+            } else {
+                scanBuffer += e.key;
+                // Remove unwanted characters like Shift, Ctrl, Alt, etc.
+                scanBuffer = scanBuffer.replace(/Shift|Control|Alt|CapsLock/g, '');
+            }
+        });
+
+    function createTextLabelTag(text, position = new THREE.Vector3(0, 0, 0)) {
+      const dpi = window.devicePixelRatio || 1;
+      const width = 512;
+      const height = 160;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width * dpi;
+      canvas.height = height * dpi;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpi, dpi);
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(0, 0, width, height);
+
+      ctx.fillStyle = 'white';
+      ctx.font = 'bold 32px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      const posText = `X: ${position.x.toFixed(1)}, Y: ${position.y.toFixed(1)}, Z: ${position.z.toFixed(1)}`;
+
+      ctx.fillText(`Item: ${text}`, width / 2, 50);
+      ctx.fillText(posText, width / 2, 110);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(6, 2, 1); // size in 3D units
+
+
+      const sprite1 = new THREE.Sprite(material);
+      sprite1.scale.set(5, 1.5, 1); // Adjust size
+      sprite1.position.copy(position);
+
+      return { sprite, sprite1 };
+    }
+
+        function handleBarcodeScan(code) {
+            if (!itemScanCounts[code]) {
+                itemScanCounts[code] = 1;
+                console.log(`Scanned "${code}" once.`);
+            } else {
+                itemScanCounts[code]++;
+                const selectedZ = parseFloat(document.getElementById("heightLevel").value);
+                const palletPosition = new THREE.Vector3(lastCameraPos.x, selectedZ, lastCameraPos.y);
+                const labelOffset = new THREE.Vector3(2, 3, 0);
+                const labelPosition = new THREE.Vector3().addVectors(palletPosition, labelOffset);
+
+                if (itemScanCounts[code] === 2) {
+                    console.log(`Second scan for "${code}". Placing object.`);
+
+                    loaderOBJ.load('./pallet.obj', function (obj) {
+                        obj.scale.setScalar(.25);
+                        obj.position.copy(palletPosition);
+                        scene.add(obj);
+
+                        const label = createTextLabelTag(code, labelPosition).sprite;
+                        label.position.copy(labelPosition);
+                        scene.add(label);
+
+                        const points = [palletPosition, labelPosition];
+                        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                        const material = new THREE.LineBasicMaterial({ color: 0xffffff });
+                        const line = new THREE.Line(geometry, material);
+                        scene.add(line);
+
+                        labelSprites.push(label);
+
+                        placedPallets[code] = { pallet: obj, label, line };
+                    });
+
+                } else {
+                    console.log(`Moving existing "${code}" to new position.`);
+
+                    const obj = placedPallets[code];
+                    if (obj) {
+                        obj.pallet.position.copy(palletPosition);
+
+                        const newLabelPos = new THREE.Vector3().addVectors(palletPosition, labelOffset);
+                        obj.label.position.copy(newLabelPos);
+
+                        // Update line geometry
+                        const newPoints = [palletPosition, newLabelPos];
+                        obj.line.geometry.dispose();
+                        obj.line.geometry = new THREE.BufferGeometry().setFromPoints(newPoints);
+
+                        // Update label texture with new location
+                        const newLabel = createTextLabel(code, newLabelPos).sprite;
+                        obj.label.material.map.dispose(); // cleanup
+                        obj.label.material.map = newLabel.material.map;
+                    }
+
+                    //itemScanCounts[code] = 2; // Reset to allow repeated moves
+                }
+            }
+
+            updateScannedItemsDisplay();
+        }
+
+        function updateScannedItemsDisplay() {
+            const scannedListHTML = Object.keys(itemScanCounts)
+                .map(code => `<li>${code}: ${itemScanCounts[code]} scan(s)</li>`)
+                .join('');
+            document.getElementById("scannedList").innerHTML = `<ul>${scannedListHTML}</ul>`;
+        }
+
+        navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                posit = new Posit(markerSize, canvas.width);
+                requestAnimationFrame(tick);
+            };
+        });
+
+        const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
+
+        function drawCorners(corners) {
+            ctx.beginPath();
+            for (let i = 0; i < corners.length; i++) {
+                const c = corners[i];
+                ctx.lineTo(c.x, c.y);
+            }
+            ctx.closePath();
+            ctx.strokeStyle = "lime";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function markerSizeInPixels(corners) {
+            let size = 0;
+            for (let i = 0; i < corners.length; i++) {
+                const c1 = corners[i];
+                const c2 = corners[(i + 1) % corners.length];
+                size += Math.hypot(c2.x - c1.x, c2.y - c1.y);
+            }
+            return size;
+        }
+
+        function updateHistory(map, markerId, newValue) {
+            const history = map.get(markerId) || [];
+            history.push(newValue);
+            if (history.length > MAX_HISTORY) history.shift();
+            map.set(markerId, history);
+            return history;
+        }
+
+        function transformToWorld(Rm, Tm, Rc, Tc) {
+            return [
+                Rm[0][0] * Tc[0] + Rm[0][1] * Tc[1] + Rm[0][2] * Tc[2] + Tm[0],
+                Rm[1][0] * Tc[0] + Rm[1][1] * Tc[1] + Rm[1][2] * Tc[2] + Tm[1],
+                Rm[2][0] * Tc[0] + Rm[2][1] * Tc[1] + Rm[2][2] * Tc[2] + Tm[2]
+            ];
+        }
+
+        function invertPose(R, T) {
+            const Rt = R[0].map((_, i) => R.map(row => row[i]));
+            const Tinv = [
+                -(Rt[0][0] * T[0] + Rt[0][1] * T[1] + Rt[0][2] * T[2]),
+                -(Rt[1][0] * T[0] + Rt[1][1] * T[1] + Rt[1][2] * T[2]),
+                -(Rt[2][0] * T[0] + Rt[2][1] * T[1] + Rt[2][2] * T[2])
+            ];
+            return { R: Rt, T: Tinv };
+        }
+
+        function createTextLabel(text, color = 'black') {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = color;
+            ctx.font = '24px Arial';
+            ctx.fillText(text, 10, 40);
+            const texture = new THREE.CanvasTexture(canvas);
+            const material = new THREE.SpriteMaterial({ map: texture });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(1.5, 0.4, 1);
+            return sprite;
+        }
+
+        function createCylinder(markerId) {
+            const geo = new THREE.CylinderGeometry(0.1524, 0.1524, 5, 32);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+            const mesh = new THREE.Mesh(geo, mat);
+            const label = createTextLabel(`ID: ${markerId}`, 'blue');
+            label.position.set(0, 3, 0);
+            mesh.add(label);
+            return mesh;
+        }
+
+        function getMarkerTrend() {
+            if (distanceHistory.length < distanceWindowSize) return 'neutral';
+            let decreasing = 0, increasing = 0;
+            for (let i = 1; i < distanceHistory.length; i++) {
+                if (distanceHistory[i] < distanceHistory[i - 1]) decreasing++;
+                if (distanceHistory[i] > distanceHistory[i - 1]) increasing++;
+            }
+            if (decreasing >= 3) return 'approaching';
+            if (increasing >= 3) return 'reversing';
+            return 'neutral';
+        }
+
+        function tick() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const markers = detector.detect(imageData);
+
+            for (const marker of markers) {
+                drawCorners(marker.corners);
+                const pixelSize = markerSizeInPixels(marker.corners);
+                updateHistory(markerSizeHistory, marker.id, pixelSize);
+                const pose = posit.pose(marker.corners);
+                if (!pose) continue;
+
+                updateHistory(zHistory, marker.id, pose.bestTranslation[2]);
+
+                const { R: Rc, T: Tc } = invertPose(pose.bestRotation, pose.bestTranslation);
+                const camWorld = transformToWorld(
+                    [[1, 0, 0], [0, 1, 0], [0, 0, 1]], [0, 0, 0], Rc, Tc
+                );
+                camWorld[1] = 2;
+                const posVec = new THREE.Vector3(...camWorld);
+
+                if (!addedMarkers.has(marker.id)) {
+                    const mesh = createCylinder(marker.id);
+                    mesh.position.copy(posVec);
+                    scene.add(mesh);
+                    addedMarkers.set(marker.id, { mesh, position: posVec.clone() });
+                } else {
+                    const markerObj = addedMarkers.get(marker.id);
+                    markerObj.position.copy(posVec);
+                }
+
+                currentTarget = posVec.clone();
+                markerSizeHistory.set('current', markerSizeHistory.get(marker.id));
+                zHistory.set('current', zHistory.get(marker.id));
+
+                lastCameraPos.x=cameraMarker.position.x
+lastCameraPos.y=cameraMarker.position.y
+lastCameraPos.z =1
+                break; // process first marker
+            }
+
+            requestAnimationFrame(tick);
+        }
+
+        function init3DScene() {
+            scene = new THREE.Scene();
+            camera3D = new THREE.PerspectiveCamera(75, 800 / 600, 0.1, 100);
+            camera3D.position.set(12, 12, 20);
+            camera3D.lookAt(6.5, 4.5, 7);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(800, 600);
+            document.getElementById("threeContainer").appendChild(renderer.domElement);
+
+            scene.add(new THREE.GridHelper(20, 20));
+            scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+            scene.add(new THREE.Box3Helper(new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(13, 9, 14)), 0xaaaaaa));
+
+            loaderGLTF.load('./forklift.gltf', gltf => {
+                cameraMarker = gltf.scene;
+                cameraMarker.scale.setScalar(0.5);
+                scene.add(cameraMarker);
+            });
+
+            controls = new OrbitControls(camera3D, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxPolarAngle = Math.PI / 2;
+
+            // 🎥 Follow mode camera movement
+            if (followMode && cameraMarker) {
+                const offsetDistance = 2;
+                const heightOffset = 1;
+
+                const markerDirection = new THREE.Vector3(
+                    -Math.sin(cameraMarker.rotation.y),
+                    0,
+                    -Math.cos(cameraMarker.rotation.y)
+                );
+
+                const followPosition = new THREE.Vector3().copy(cameraMarker.position)
+                    .add(markerDirection.multiplyScalar(offsetDistance))
+                    .setY(cameraMarker.position.y + heightOffset);
+
+                camera3D.position.lerp(followPosition, 0.1);
+                camera3D.lookAt(cameraMarker.position);
+            }
+
+            // 🧭 Update controls and render
+            if (cameraMarker) {
+                controls.target.copy(cameraMarker.position);
+            }
+
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (cameraMarker && currentTarget) {
+                const modelPos = cameraMarker.position;
+                const direction = new THREE.Vector3().subVectors(currentTarget, modelPos);
+                direction.y = 0;
+                const distance = direction.length();
+                distanceHistory.push(distance);
+                if (distanceHistory.length > distanceWindowSize) distanceHistory.shift();
+
+                const trend = getMarkerTrend();
+                const targetAngle = Math.atan2(direction.x, direction.z);
+                let angleDiff = targetAngle - cameraMarker.rotation.y;
+                angleDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
+
+                if (!statusLabel) {
+                    statusLabel = createTextLabel('', 'red');
+                    statusLabel.position.set(0, 2.5, 0);
+                    cameraMarker.add(statusLabel);
+                }
+
+                const ctx = statusLabel.material.map.image.getContext('2d');
+                ctx.clearRect(0, 0, 256, 64);
+                ctx.fillStyle = 'red';
+                ctx.font = '24px Arial';
+                ctx.fillText(trend === 'reversing' ? "Reversing" :
+                    trend === 'approaching' ? "Approaching" : "Waiting", 10, 40);
+                statusLabel.material.map.needsUpdate = true;
+
+                if (distance > 0.05 && trend !== 'neutral' && !cooldown) {
+                    cooldown = true;
+                    setTimeout(() => cooldown = false, cooldownTime);
+
+                    if (trend === 'reversing') {
+                        const back = new THREE.Vector3(-Math.sin(cameraMarker.rotation.y), 0, -Math.cos(cameraMarker.rotation.y));
+                        cameraMarker.position.add(back.multiplyScalar(moveSpeed));
+                    } else if (trend === 'approaching') {
+                        cameraMarker.rotation.y += THREE.MathUtils.clamp(angleDiff, -turnSpeed, turnSpeed);
+                        if (Math.abs(angleDiff) < 0.3) {
+                            const forward = new THREE.Vector3(Math.sin(cameraMarker.rotation.y), 0, Math.cos(cameraMarker.rotation.y));
+                            const dynamicSpeed = moveSpeed * Math.min(distance, 1);
+                            cameraMarker.position.add(forward.multiplyScalar(dynamicSpeed));
+                        }
+                    }
+                }
+            }
+
+            if (followMode && cameraMarker) {
+                const offset = new THREE.Vector3(
+                    -Math.sin(cameraMarker.rotation.y) * 2,
+                    1,
+                    -Math.cos(cameraMarker.rotation.y) * 2
+                );
+                camera3D.position.lerp(cameraMarker.position.clone().add(offset), 0.1);
+                camera3D.lookAt(cameraMarker.position);
+            }
+
+            controls.update();
+            renderer.render(scene, camera3D);
+        }
+
+        init3DScene();
+    </script>
+
+</body>
+
+</html>
