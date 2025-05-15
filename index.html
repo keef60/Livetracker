@@ -20,10 +20,10 @@
     {
       "imports": {
         
-        "three": "./three.js-dev/build/three.module.js",
-        "three/webgpu": "./three.js-dev/build/three.webgpu.js",
-        "three/tsl": "./three.js-dev/build/three.tsl.js",
-        "three/addons/": "./three.js-dev/examples/jsm/"
+        "three": "./node_modules/three/build/three.module.js",
+        "three/webgpu": "./node_modules/three/build/three.webgpu.js",
+        "three/tsl": "./node_modules/three/build/three.tsl.js",
+        "three/addons/": "./node_modules/three/examples/jsm/"
       }
     }
   </script>
@@ -42,8 +42,8 @@
 
     <!-- Load the js-aruco2 modules -->
      <script type="module">
-        import AR from './js-aruco2-master/src/aruco.js';
-        import POS from './js-aruco2-master/src/posit1.js';
+        import AR from './aruco.js';
+        import POS from './posit1.js';
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
