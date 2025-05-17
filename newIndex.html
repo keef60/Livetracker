@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ArUco Tracker with Forklift Model</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: -1;
+        }
+
+        /* Styling for the button */
+        #captureButton {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            z-index: 1;
+            /* Ensure it's on top of the canvas/video */
+            border-radius: 5px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        #captureButton:hover {
+            background-color: rgba(0, 0, 0, 0.8);
+        }
+
+        #captureButton:active {
+            background-color: rgba(0, 0, 0, 1);
+        }
+    </style>
+
+    <!-- Import map to enable module loading -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "./three.js-dev/build/three.module.js",
+        "three/addons/": "./three.js-dev/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+
+<body>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
+    <canvas id="spaghettiChartCanvas"></canvas>
+    <button id="captureButton">Capture Item Locations</button>
+    <button id="followToggle" style="
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  padding: 10px 15px;
+  font-size: 14px;
+">Follow Camera: ON</button>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import AR from './js-aruco2-master/src/aruco.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'; // Import GLTFLoader
+            import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const captureButton = document.getElementById('captureButton');
+
+        // Set up Three.js
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("spaghettiChartCanvas") });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0xffffff, 1); // Set background color to white
+
+        // Create an OrbitControls for better camera manipulation
+        const controls = new OrbitControls(camera, renderer.domElement);
+        camera.position.set(0, 10, 0);  // Top-down view
+        camera.up.set(0, 0, -1);        // Set Z-up for top-down feel
+        camera.lookAt(0, 0, 0);         // Focus on the origin
+        controls.update();
+
+        let velocity = 0;
+        const maxSpeed = 0.02;
+        const acceleration = 0.002;
+        const deceleration = 0.005;
+        const rotationSpeed = 0.05;
+        let direction = new THREE.Vector3(0, 0, 1); // Initial forward vector
+        let lastTarget = null;
+        let trailPoints = [];
+        const trailMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        let trailGeometry = new THREE.BufferGeometry();
+        let trailLine = new THREE.Line(trailGeometry, trailMaterial);
+        scene.add(trailLine);
+
+        let followMode = true;
+
+        const followButton = document.getElementById('followToggle');
+        followButton.addEventListener('click', () => {
+            followMode = !followMode;
+            followButton.textContent = `Follow Camera: ${followMode ? 'ON' : 'OFF'}`;
+        });
+
+
+
+        // Add lighting to the scene
+        const ambientLight = new THREE.AmbientLight(0x404040); // Soft light
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(0, 10, 5).normalize();
+        scene.add(directionalLight);
+
+        // Grid helper
+        scene.add(new THREE.GridHelper(10, 10));
+
+        // Spaghetti line
+        const lineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        let points = [];
+        let lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+        const line = new THREE.Line(lineGeometry, lineMaterial);
+        scene.add(line);
+
+        const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
+        let markerPositions = {}; // Store marker positions by ID
+
+        // Initialize GLTFLoader
+        const loaderGLTF = new GLTFLoader();
+
+        // Variable to hold the forklift model
+        let forkliftModel;
+
+        // Load the forklift model
+        loaderGLTF.load('./forklift.gltf', gltf => {
+            forkliftModel = gltf.scene;
+            forkliftModel.scale.setScalar(0.5);  // Scale the forklift model
+            forkliftModel.position.set(0, 0, 0); // Position forklift at origin (or any other position)
+            scene.add(forkliftModel);
+        });
+
+        // Get video stream from camera
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    animate();
+                };
+            });
+
+
+            
+        // Smoothing function to interpolate the forklift's movement
+        function smoothPosition(targetPosition, currentPosition, smoothingFactor) {
+            return currentPosition.lerp(targetPosition, smoothingFactor);
+        }
+
+        // Function to calculate average position of detected markers
+        function getAverageMarkerPosition(markers) {
+            const avgPosition = new THREE.Vector3(0, 0, 0);
+            let totalMarkers = 0;
+
+            markers.forEach(marker => {
+                const markerCenter = marker.corners.reduce((sum, corner) => {
+                    return sum.add(new THREE.Vector2(corner.x, corner.y));
+                }, new THREE.Vector2()).divideScalar(marker.corners.length);
+
+                avgPosition.add(new THREE.Vector3(
+                    (markerCenter.x / canvas.width - 0.5) * 10,  // X in -5 to 5
+                    0,                                            // Z = 0 plane
+                    (0.5 - markerCenter.y / canvas.height) * 10   // Y in -5 to 5
+                ));
+                totalMarkers++;
+            });
+
+            if (totalMarkers > 0) {
+                avgPosition.divideScalar(totalMarkers);
+            }
+            return avgPosition;
+        }
+
+        // Main animation loop
+const tolerance = 0.5;  // Define the tolerance threshold (you can adjust this value)
+
+// Main animation loop
+function animate() {
+    requestAnimationFrame(animate);
+
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const markers = detector.detect(imageData);
+
+        markerPositions = {}; // Reset marker positions
+
+        if (markers.length > 0) {
+            const target = getAverageMarkerPosition(markers);
+            const forkliftPos = forkliftModel.position;
+
+            // Only update lastTarget if the movement is above the tolerance threshold
+            if (!lastTarget || lastTarget.distanceTo(target) > tolerance) {
+                lastTarget = target.clone();
+            }
+
+            // If the target has changed significantly, move the forklift
+            if (lastTarget) {
+                const desiredDirection = new THREE.Vector3().subVectors(lastTarget, forkliftPos);
+                desiredDirection.y = 0;
+                const distance = desiredDirection.length();
+
+                // ===== Move if we're far enough from the target =====
+                if (distance > 0.05) {
+                    desiredDirection.normalize();
+                    const angleBetween = direction.angleTo(desiredDirection);
+                    const goingBackward = angleBetween > Math.PI / 2;
+
+                    // Speed up or slow down based on direction
+                    if (goingBackward) {
+                        velocity = Math.max(velocity - deceleration, -maxSpeed); // Decelerate or reverse
+                    } else {
+                        velocity = Math.min(velocity + acceleration, maxSpeed); // Accelerate
+                    }
+
+                    const cross = new THREE.Vector3().crossVectors(direction, desiredDirection);
+                    if (cross.y !== 0) {
+                        direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), rotationSpeed * Math.sign(cross.y));
+                    }
+
+                    const movement = direction.clone().multiplyScalar(velocity);
+                    forkliftModel.position.add(movement);
+                    forkliftModel.lookAt(forkliftModel.position.clone().add(direction));
+                } else {
+                    // Close enough to stop
+                    velocity = Math.max(0, velocity - deceleration);  // Slow down when near the target
+                }
+            }
+        } else {
+            // No markers — stop forklift
+            velocity = Math.max(0, velocity - deceleration); // Slow down when no markers are detected
+        }
+
+        // === Spaghetti trail logic ===
+        const lastPoint = trailPoints[trailPoints.length - 1];
+        const currentPos = forkliftModel.position.clone();
+
+        if (!lastPoint || lastPoint.distanceTo(currentPos) > 0.02) {
+            trailPoints.push(currentPos.clone());
+            if (trailPoints.length > 1000) trailPoints.shift(); // Limit trail length
+
+            trailGeometry.dispose(); // Fix for Buffer size warning
+            trailGeometry = new THREE.BufferGeometry().setFromPoints(trailPoints);
+            trailLine.geometry = trailGeometry;
+        }
+
+        // === Optional: follow camera behind forklift ===
+        if (followMode) {
+            // Calculate the offset behind the forklift, taking into account forklift's rotation
+            const offset = new THREE.Vector3(
+                -Math.sin(forkliftModel.rotation.y) * 5,  // X offset (behind forklift)
+                3,                                        // Y offset (above forklift)
+                -Math.cos(forkliftModel.rotation.y) * 5   // Z offset (behind forklift)
+            );
+
+            const targetPosition = forkliftModel.position.clone().add(offset);
+            camera.position.lerp(targetPosition, 0.1);  // Smoothly move the camera to the target position
+
+            // Ensure the camera looks at the forklift's position and smoothly rotates to it
+            camera.lookAt(forkliftModel.position);
+
+            // Optionally, smooth the camera's rotation (to avoid snapping):
+            const directionToForklift = forkliftModel.position.clone().sub(camera.position);
+            const rotationSpeed = 0.1;
+            camera.rotation.y += directionToForklift.x * rotationSpeed;
+
+            // Ensure the camera looks at the forklift and stays upright
+            camera.up.set(0, 1, 0);  // Define "up" vector (Y-axis is up)
+            camera.lookAt(forkliftModel.position);  // Look at the forklift
+        }
+
+        controls.update();
+        renderer.render(scene, camera);
+    }
+}
+
+        // Capture the coordinates of all detectable markers when the button is clicked
+        captureButton.addEventListener('click', () => {
+            if (Object.keys(markerPositions).length > 0) {
+                console.log('Captured Marker Locations:');
+                for (const [id, pos] of Object.entries(markerPositions)) {
+                    console.log(`Marker ID: ${id} - X: ${pos.x}, Y: ${pos.z}, Z: ${pos.y}`);
+                }
+            } else {
+                console.log('No markers detected.');
+            }
+        });
+    </script>
+</body>
+
+</html>
