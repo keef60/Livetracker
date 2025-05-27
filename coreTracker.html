@@ -149,6 +149,46 @@
                 this.mesh = null; // 3D zone box
                 this.labelElement = null; // DOM label
             }
+            // Create label for the zone box
+            createSpriteLabel() {
+                const canvas = document.createElement('canvas');
+                const size = 256;
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d');
+
+                // Draw background box
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                ctx.fillRect(0, 0, size, size);
+
+                // Draw text
+                ctx.fillStyle = 'white';
+                ctx.font = '18px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.name, size / 2, size / 2);
+
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.minFilter = THREE.LinearFilter;
+                texture.needsUpdate = true;
+
+                const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+                const sprite = new THREE.Sprite(material);
+
+                // Set size of sprite label
+                sprite.scale.set(1, 1, 1); // Adjust to your liking
+
+                // Position at zone center, slightly above
+                const center = this.getCenter();
+                const labelHeightOffset = 0.5; // tweak this value to raise/lower label above zone
+
+                sprite.position.set(center.x, this.bounds.max.y + labelHeightOffset, center.z);
+
+                this.spriteLabel = sprite;
+
+                return sprite;
+            }
+
 
             // Compute center of the zone box
             getCenter() {
@@ -187,26 +227,13 @@
 
             // Add the mesh and label to the scene
             addToScene(scene) {
-                if (!this.mesh) {
-                    this.createMesh();
-                }
+                if (!this.mesh) this.createMesh();
                 scene.add(this.mesh);
-                this.createLabel();
-            }
 
-            // Create and attach the DOM label
-            createLabel() {
-                const label = document.createElement('div');
-                label.className = 'zone-label';
-                label.textContent = this.name;
-                label.style.position = 'absolute';
-                label.style.color = 'white';
-                label.style.fontSize = '14px';
-                label.style.pointerEvents = 'none';
-                label.style.zIndex = 1;
-
-                document.body.appendChild(label);
-                this.labelElement = label;
+                if (!this.spriteLabel) {
+                    this.createSpriteLabel();
+                }
+                scene.add(this.spriteLabel);
             }
 
             // Update DOM label position based on camera view
@@ -309,20 +336,7 @@
                 this.currentZone = null;
 
             }
-            createZoneLabel(zone) {
-                const label = document.createElement('div');
-                label.className = 'zone-label';
-                label.textContent = zone.name;
-                label.style.position = 'absolute';
-                label.style.color = 'white';
-                label.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-                label.style.padding = '2px 4px';
-                label.style.borderRadius = '3px';
-                label.style.fontSize = '12px';
-                label.style.pointerEvents = 'none';
-                document.body.appendChild(label);
-                zone.labelElement = label;
-            }
+
 
 
             createZones() {
@@ -331,8 +345,8 @@
                         id: 1,
                         name: 'Receiving Dock',
                         bounds: {
-                            min: { x: -.5, y: 0, z: -.5 },
-                            max: { x: 0, y: .3, z: .5 }
+                            min: { x: -5, y: 0, z: -5 },
+                            max: { x: 0, y: 3, z: 5 }
                         },
                         color: 0x00ffcc
                     }),
@@ -340,8 +354,8 @@
                         id: 2,
                         name: 'Storage Bay A',
                         bounds: {
-                            min: { x: .1, y: 0, z: -.5 },
-                            max: { x: .5, y: .3, z: .5 }
+                            min: { x: 1, y: 0, z: -5 },
+                            max: { x: 5, y: 3, z: 5 }
                         },
                         color: 0xffcc00
                     }),
@@ -349,14 +363,15 @@
                         id: 4,
                         name: 'Packaging Area',
                         bounds: {
-                            min: { x: -.3, y: 0, z: .6 },
-                            max: { x: .3, y: .3, z: .10 }
+                            min: { x: -3, y: 0, z: 6 },
+                            max: { x: 3, y: 3, z: 10 }
                         },
                         color: 0x6699ff
                     })
                 ];
 
                 zones.forEach(zone => zone.addToScene(this.scene));
+
                 return zones;
             }
 
@@ -467,6 +482,7 @@
                     this.forkliftPos.copy(this.smoothedPos);
                     this.updatePathLine(this.forkliftPos);
 
+
                     // === ✅ Zone Detection ===
                     const newZone = this.zones?.find(zone => zone.id === this.closestMarkerId);
                     if (newZone?.id !== this.currentZone?.id) {
@@ -489,8 +505,6 @@
                 } else {
                     this.playback(time);
                 }
-                this.zones?.forEach(zone => zone.updateLabelPosition(this.camera, this.renderer));
-
                 this.controls.update();
                 this.renderer.render(this.scene, this.camera);
             }
