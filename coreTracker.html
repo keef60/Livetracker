@@ -1,16 +1,86 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ArUco Tracker with Spaghetti Chart & Zones</title>
-  <style>
-    body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-    canvas { display: block; }
-    #video { position: absolute; top: 0; left: 0; z-index: -1; }
-    #captureButton { position: absolute; top: 10px; left: 10px; z-index: 10; padding: 8px 12px; }
-  </style>
-  <script type="importmap">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ArUco Tracker with Spaghetti Chart, Zones & Playback</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background: #222;
+            color: #eee;
+        }
+
+        canvas {
+            display: block;
+            background: #111;
+        }
+
+        #video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: -1;
+        }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 20;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 12px;
+            border-radius: 8px;
+            user-select: none;
+            max-width: 280px;
+        }
+
+        #controls button,
+        #controls input {
+            margin: 4px 0;
+            width: 100%;
+            padding: 6px;
+            font-size: 14px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+        }
+
+        #controls button:hover {
+            background-color: #444;
+        }
+
+        #speedRange {
+            width: 100%;
+        }
+
+        #status {
+            margin-top: 8px;
+            font-size: 13px;
+            font-weight: bold;
+            text-align: center;
+            color: #aaa;
+        }
+
+        .zone-label {
+            position: absolute;
+            font-family: sans-serif;
+            font-size: 12px;
+            color: white;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 2px 5px;
+            border-radius: 3px;
+            pointer-events: none;
+            z-index: 100;
+        }
+    </style>
+    <script type="importmap">
   {
     "imports": {
       "three": "./three.js-dev/build/three.module.js",
@@ -19,228 +89,643 @@
   }
   </script>
 </head>
+
 <body>
-  <button id="captureButton">Capture Item Location</button>
-  <video id="video" autoplay playsinline></video>
-  <canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
-  <canvas id="spaghettiChartCanvas"></canvas>
+    <div id="controls">
+        <button id="captureButton">Capture Item Location</button>
+        <button id="exportPathButton">Export Movement Path</button>
+        <button id="startPlaybackBtn">Start Playback</button>
+        <button id="stopPlaybackBtn" disabled>Stop Playback</button>
+        <button id="saveDataBtn">Save Path to LocalStorage</button>
+        <button id="loadDataBtn">Load Path from LocalStorage</button>
+        <label for="speedRange">Playback Speed: <span id="speedDisplay">1x</span></label>
+        <input type="range" id="speedRange" min="0.1" max="5" step="0.1" value="1" />
+        <div id="status">Status: Waiting for video...</div>
+    </div>
 
-  <script type="module">
-    import * as THREE from 'three';
-    import AR from './js-aruco2-master/src/aruco.js';
-    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-    import POS from './js-aruco2-master/src/posit1.js';
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
+    <canvas id="spaghettiChartCanvas"></canvas>
 
-    // ==== Constants & Config ====
-    const MARKER_SIZE = 0.04;           // Marker size in meters
-    const SMOOTHING_ALPHA = 0.2;        // EMA smoothing factor
-    const MAX_DISTANCE_JUMP = 1.5;      // Max allowed jump to filter outliers
-    const MAX_PATH_POINTS = 500;        // Max points in the path line
+    <script type="module">
+        import * as THREE from 'three';
+        import AR from './js-aruco2-master/src/aruco.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import POS from './js-aruco2-master/src/posit1.js';
 
-    // ==== Elements & Contexts ====
-    const video = document.getElementById('video');
-    const hiddenCanvas = document.getElementById('canvas');
-    const hiddenCtx = hiddenCanvas.getContext('2d');
-    const spaghettiCanvas = document.getElementById('spaghettiChartCanvas');
+        // ==== Constants & Config ====
+        const MARKER_SIZE = 0.16;           // Marker size in meters
+        const SMOOTHING_ALPHA = 0.2;        // EMA smoothing factor
+        const MAX_DISTANCE_JUMP = 1.5;      // Max allowed jump to filter outliers
+        const MAX_PATH_POINTS = 500;        // Max points in the path line
 
-    // ==== Tracker Class ====
-    class WarehouseTracker {
-      constructor() {
-        // POSIT setup for pose estimation
-        this.posit = new POS.Posit(MARKER_SIZE, hiddenCanvas.width);
+        // ==== Elements & Contexts ====
+        const video = document.getElementById('video');
+        const hiddenCanvas = document.getElementById('canvas');
+        const hiddenCtx = hiddenCanvas.getContext('2d');
+        const spaghettiCanvas = document.getElementById('spaghettiChartCanvas');
 
-        // ArUco marker detector
-        this.detector = new AR.Detector({ dictionaryName: 'ARUCO' });
+        // UI elements
+        const captureButton = document.getElementById('captureButton');
+        const exportButton = document.getElementById('exportPathButton');
+        const startPlaybackBtn = document.getElementById('startPlaybackBtn');
+        const stopPlaybackBtn = document.getElementById('stopPlaybackBtn');
+        const saveDataBtn = document.getElementById('saveDataBtn');
+        const loadDataBtn = document.getElementById('loadDataBtn');
+        const speedRange = document.getElementById('speedRange');
+        const speedDisplay = document.getElementById('speedDisplay');
+        const statusDisplay = document.getElementById('status');
 
-        // Three.js scene setup
-        this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-        this.renderer = new THREE.WebGLRenderer({ canvas: spaghettiCanvas });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-
-        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.enableZoom = true;
-        this.controls.minDistance = 2;
-        this.controls.maxDistance = 50;
-
-        this.camera.position.set(0, 10, 20);
-        this.camera.up.set(0, 0, -1);
-        this.camera.lookAt(0, 0, 0);
-        this.controls.update();
-
-        this.scene.add(new THREE.GridHelper(10, 10));
-
-        // Forklift path tracking setup
-        this.points = new Array(MAX_PATH_POINTS).fill(null);
-        this.currentPointIndex = 0;
-
-        // Create a fixed-size BufferGeometry for performance
-        const positions = new Float32Array(MAX_PATH_POINTS * 3); // x,y,z for each point
-        this.lineGeometry = new THREE.BufferGeometry();
-        this.lineGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        this.lineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-        this.line = new THREE.Line(this.lineGeometry, this.lineMaterial);
-        this.scene.add(this.line);
-
-        this.smoothedPos = null;
-        this.forkliftPos = new THREE.Vector3();
-        this.currentZoneId = null;
-        this.storedItems = [];
-
-        this.animate = this.animate.bind(this);
-      }
-
-      estimatePose(marker) {
-        const corners = marker.corners.map(c => ({ x: c.x, y: c.y }));
-        const pose = this.posit.pose(corners);
-        if (!pose || !pose.bestRotation || !pose.bestTranslation) return null;
-        return {
-          translation: pose.bestTranslation,
-          rotation: pose.bestRotation
-        };
-      }
-
-      updatePathLine(newPos) {
-        // Add new point to the circular buffer
-        this.points[this.currentPointIndex] = newPos.clone();
-        this.currentPointIndex = (this.currentPointIndex + 1) % MAX_PATH_POINTS;
-
-        // Update BufferGeometry positions attribute
-        const positions = this.lineGeometry.attributes.position.array;
-        let idx = 0;
-
-        // Write points starting from currentPointIndex to the end, then beginning to currentPointIndex
-        for (let i = 0; i < MAX_PATH_POINTS; i++) {
-          const point = this.points[(this.currentPointIndex + i) % MAX_PATH_POINTS];
-          if (point) {
-            positions[idx++] = point.x;
-            positions[idx++] = point.y;
-            positions[idx++] = point.z;
-          } else {
-            // Fill empty space with last valid point or zeros
-            if (idx >= 3) {
-              positions[idx] = positions[idx - 3];
-              positions[idx+1] = positions[idx - 2];
-              positions[idx+2] = positions[idx - 1];
-            } else {
-              positions[idx++] = 0;
-              positions[idx++] = 0;
-              positions[idx++] = 0;
+        // === Zone Class ===
+        class Zone {
+            constructor({ id, name, bounds, color = 0x00ff00 }) {
+                this.id = id;
+                this.name = name;
+                this.bounds = {
+                    min: new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z),
+                    max: new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z),
+                };
+                this.color = color;
+                this.mesh = null; // 3D zone box
+                this.labelElement = null; // DOM label
             }
-            idx += 3;
-          }
-        }
-        this.lineGeometry.attributes.position.needsUpdate = true;
-      }
 
-      processFrame() {
-        if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
-
-        // Draw video frame to hidden canvas for processing
-        hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-        const imageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
-
-        // Detect markers
-        const markers = this.detector.detect(imageData);
-
-        let sumPos = new THREE.Vector3();
-        let validMarkersCount = 0;
-        let closestMarker = null;
-        let closestZ = Infinity;
-
-        markers.forEach(marker => {
-          const pose = this.estimatePose(marker);
-          if (!pose) return;
-
-          const t = pose.translation;
-          if ([t[0], t[1], t[2]].some(v => !isFinite(v) || isNaN(v))) return;
-
-          const pos = new THREE.Vector3(t[0], -t[1], -t[2]);
-          if (!isFinite(pos.z) || isNaN(pos.z)) return;
-
-          sumPos.add(pos);
-          validMarkersCount++;
-
-          if (pos.z < closestZ) {
-            closestZ = pos.z;
-            closestMarker = marker;
-          }
-        });
-
-        this.currentZoneId = closestMarker ? closestMarker.id : null;
-
-        if (validMarkersCount > 0) {
-          const avgPos = sumPos.divideScalar(validMarkersCount);
-
-          if (!this.smoothedPos) {
-            this.smoothedPos = avgPos.clone();
-          } else {
-            // Ignore large jumps
-            if (this.smoothedPos.distanceTo(avgPos) <= MAX_DISTANCE_JUMP) {
-              this.smoothedPos.lerp(avgPos, SMOOTHING_ALPHA);
-            } else {
-              console.warn('Outlier detected, skipping frame');
+            // Compute center of the zone box
+            getCenter() {
+                return new THREE.Vector3().addVectors(this.bounds.min, this.bounds.max).multiplyScalar(0.5);
             }
-          }
 
-          this.forkliftPos.copy(this.smoothedPos);
-          this.updatePathLine(this.forkliftPos);
+            // Check if a 3D position is inside this zone
+            contains(position) {
+                return (
+                    position.x >= this.bounds.min.x && position.x <= this.bounds.max.x &&
+                    position.y >= this.bounds.min.y && position.y <= this.bounds.max.y &&
+                    position.z >= this.bounds.min.z && position.z <= this.bounds.max.z
+                );
+            }
+
+            // Create the visual 3D mesh for the zone box
+            createMesh() {
+                const size = new THREE.Vector3().subVectors(this.bounds.max, this.bounds.min);
+                const center = this.getCenter();
+
+                const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+                const material = new THREE.MeshBasicMaterial({
+                    color: this.color,
+                    transparent: true,
+                    opacity: 0.2,
+                    wireframe: false,
+                });
+
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.copy(center);
+                mesh.name = `Zone-${this.id}`;
+                this.mesh = mesh;
+
+                return mesh;
+            }
+
+            // Add the mesh and label to the scene
+            addToScene(scene) {
+                if (!this.mesh) {
+                    this.createMesh();
+                }
+                scene.add(this.mesh);
+                this.createLabel();
+            }
+
+            // Create and attach the DOM label
+            createLabel() {
+                const label = document.createElement('div');
+                label.className = 'zone-label';
+                label.textContent = this.name;
+                label.style.position = 'absolute';
+                label.style.color = 'white';
+                label.style.fontSize = '14px';
+                label.style.pointerEvents = 'none';
+                label.style.zIndex = 1;
+
+                document.body.appendChild(label);
+                this.labelElement = label;
+            }
+
+            // Update DOM label position based on camera view
+            updateLabelPosition(camera, renderer) {
+                if (!this.labelElement) return;
+
+                const center = this.getCenter().clone();
+                center.project(camera);
+
+                const halfWidth = renderer.domElement.clientWidth / 2;
+                const halfHeight = renderer.domElement.clientHeight / 2;
+
+                const x = center.x * halfWidth + halfWidth;
+                const y = -center.y * halfHeight + halfHeight;
+
+                this.labelElement.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
+
+                // Optionally hide if behind camera
+                this.labelElement.style.display = (center.z < 1 && center.z > -1) ? 'block' : 'none';
+            }
+
+            // Optional visibility toggle
+            setVisible(visible) {
+                if (this.mesh) this.mesh.visible = visible;
+                if (this.labelElement) this.labelElement.style.display = visible ? 'block' : 'none';
+            }
+
+            toString() {
+                return `Zone ${this.id} [${this.name}] from ${this.bounds.min.toArray()} to ${this.bounds.max.toArray()}`;
+            }
         }
 
-        this.controls.update();
-        this.renderer.render(this.scene, this.camera);
-      }
+        // ==== Tracker Class ====
+        class WarehouseTracker {
+            constructor() {
+                // POSIT setup for pose estimation
+                this.posit = new POS.Posit(MARKER_SIZE, hiddenCanvas.width);
 
-      animate() {
-        requestAnimationFrame(this.animate);
-        this.processFrame();
-      }
+                // ArUco marker detector
+                this.detector = new AR.Detector({ dictionaryName: 'ARUCO' });
 
-      captureItem(itemID) {
-        if (!itemID) return alert('Item ID is required');
+                // Three.js scene setup
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer({ canvas: spaghettiCanvas, antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setClearColor(0x111111);
 
-        this.storedItems.push({
-          id: itemID,
-          position: this.forkliftPos.clone(),
-          zoneMarkerId: this.currentZoneId || 'Unknown',
-          timestamp: new Date()
+                this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.enableZoom = true;
+                this.controls.minDistance = 2;
+                this.controls.maxDistance = 50;
+
+                this.camera.position.set(0, 10, 20);
+                this.camera.up.set(0, 0, -1);
+                this.camera.lookAt(0, 0, 0);
+                this.controls.update();
+
+                this.scene.add(new THREE.GridHelper(10, 10));
+
+                // Forklift path tracking setup
+                this.points = new Array(MAX_PATH_POINTS).fill(null);
+                this.currentPointIndex = 0;
+
+                // Create a fixed-size BufferGeometry for performance
+                const positions = new Float32Array(MAX_PATH_POINTS * 3); // x,y,z for each point
+                this.lineGeometry = new THREE.BufferGeometry();
+                this.lineGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                this.lineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+                this.line = new THREE.Line(this.lineGeometry, this.lineMaterial);
+                this.scene.add(this.line);
+
+                // Playback line
+                this.playbackMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+                this.playbackLineGeometry = new THREE.BufferGeometry();
+                this.playbackLinePositions = new Float32Array(MAX_PATH_POINTS * 3);
+                this.playbackLineGeometry.setAttribute('position', new THREE.BufferAttribute(this.playbackLinePositions, 3));
+                this.playbackLine = new THREE.Line(this.playbackLineGeometry, this.playbackMaterial);
+                this.scene.add(this.playbackLine);
+                this.playbackLine.visible = false;
+
+                this.smoothedPos = null;
+                this.forkliftPos = new THREE.Vector3();
+                this.currentZoneId = null;
+                this.storedItems = [];
+
+                // Store path points with timestamps
+                this.trackedPathPoints = [];
+
+                // Playback controls
+                this.isPlayingBack = false;
+                this.playbackIndex = 0;
+                this.playbackSpeed = 1; // multiplier
+                this.playbackLastUpdateTime = 0;
+
+                this.animate = this.animate.bind(this);
+
+                //Zone creation
+                this.zones = this.createZones();
+                this.currentZone = null;
+
+            }
+            createZoneLabel(zone) {
+                const label = document.createElement('div');
+                label.className = 'zone-label';
+                label.textContent = zone.name;
+                label.style.position = 'absolute';
+                label.style.color = 'white';
+                label.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+                label.style.padding = '2px 4px';
+                label.style.borderRadius = '3px';
+                label.style.fontSize = '12px';
+                label.style.pointerEvents = 'none';
+                document.body.appendChild(label);
+                zone.labelElement = label;
+            }
+
+
+            createZones() {
+                const zones = [
+                    new Zone({
+                        id: 1,
+                        name: 'Receiving Dock',
+                        bounds: {
+                            min: { x: -.5, y: 0, z: -.5 },
+                            max: { x: 0, y: .3, z: .5 }
+                        },
+                        color: 0x00ffcc
+                    }),
+                    new Zone({
+                        id: 2,
+                        name: 'Storage Bay A',
+                        bounds: {
+                            min: { x: .1, y: 0, z: -.5 },
+                            max: { x: .5, y: .3, z: .5 }
+                        },
+                        color: 0xffcc00
+                    }),
+                    new Zone({
+                        id: 4,
+                        name: 'Packaging Area',
+                        bounds: {
+                            min: { x: -.3, y: 0, z: .6 },
+                            max: { x: .3, y: .3, z: .10 }
+                        },
+                        color: 0x6699ff
+                    })
+                ];
+
+                zones.forEach(zone => zone.addToScene(this.scene));
+                return zones;
+            }
+
+
+            estimatePose(marker) {
+                const corners = marker.corners.map(c => ({ x: c.x, y: c.y }));
+                const pose = this.posit.pose(corners);
+                if (!pose || !pose.bestRotation || !pose.bestTranslation) return null;
+                return {
+                    translation: pose.bestTranslation,
+                    rotation: pose.bestRotation
+                };
+            }
+
+            updatePathLine(newPos) {
+                // Add new point to the circular buffer for rendering
+                this.points[this.currentPointIndex] = newPos.clone();
+                this.currentPointIndex = (this.currentPointIndex + 1) % MAX_PATH_POINTS;
+
+                // Add timestamped position for evaluation
+                this.trackedPathPoints.push({
+                    position: newPos.clone(),
+                    timestamp: new Date()
+                });
+
+                // Limit stored points to MAX_PATH_POINTS * 10 to keep memory manageable
+                if (this.trackedPathPoints.length > MAX_PATH_POINTS * 10) {
+                    this.trackedPathPoints.shift();
+                }
+
+                // Update BufferGeometry positions attribute (rendered path)
+                const positions = this.lineGeometry.attributes.position.array;
+                let idx = 0;
+
+                for (let i = 0; i < MAX_PATH_POINTS; i++) {
+                    const point = this.points[(this.currentPointIndex + i) % MAX_PATH_POINTS];
+                    if (point) {
+                        positions[idx++] = point.x;
+                        positions[idx++] = point.y;
+                        positions[idx++] = point.z;
+                    } else {
+                        positions[idx++] = 0;
+                        positions[idx++] = 0;
+                        positions[idx++] = 0;
+                    }
+                }
+                this.lineGeometry.attributes.position.needsUpdate = true;
+            }
+
+            processFrame() {
+                if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+                // Draw video frame to hidden canvas for processing
+                hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+                const imageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+
+                const markers = this.detector.detect(imageData);
+
+                let sumPos = new THREE.Vector3(0, 0, 0);
+                let totalWeight = 0;
+                let closestMarker = null;
+                let closestZ = Infinity;
+
+                markers.forEach(marker => {
+                    const pose = this.estimatePose(marker);
+                    if (!pose) return;
+
+                    const t = pose.translation;
+                    if (
+                        isNaN(t[0]) || isNaN(t[1]) || isNaN(t[2]) ||
+                        !isFinite(t[0]) || !isFinite(t[1]) || !isFinite(t[2])
+                    ) return;
+
+                    const pos = new THREE.Vector3(t[0], -t[1], -t[2]);
+                    if (isNaN(pos.z) || !isFinite(pos.z)) return;
+
+                    // Accumulate for average pose
+                    sumPos.add(pos);
+                    totalWeight++;
+
+                    if (pos.z < closestZ) {
+                        closestZ = pos.z;
+                        closestMarker = marker;
+                    }
+                });
+
+                // Optional: Still record marker ID
+                if (closestMarker) {
+                    this.closestMarkerId = closestMarker.id;
+                } else {
+                    this.closestMarkerId = null;
+                }
+
+                if (totalWeight > 0) {
+                    const avgPos = sumPos.divideScalar(totalWeight);
+
+                    if (!this.smoothedPos) {
+                        this.smoothedPos = avgPos.clone();
+                    } else {
+                        if (this.smoothedPos.distanceTo(avgPos) > MAX_DISTANCE_JUMP) {
+                            console.warn('Outlier detected, skipping frame');
+                            return; // Skip frame
+                        } else {
+                            this.smoothedPos.lerp(avgPos, SMOOTHING_ALPHA);
+                        }
+                    }
+
+                    this.forkliftPos.copy(this.smoothedPos);
+                    this.updatePathLine(this.forkliftPos);
+
+                    // === ✅ Zone Detection ===
+                    const newZone = this.zones?.find(zone => zone.id === this.closestMarkerId);
+                    if (newZone?.id !== this.currentZone?.id) {
+                        if (newZone) {
+                            console.log(`🚧 Entered zone: ${newZone.name}`);
+                        } else if (this.currentZone) {
+                            console.log(`🏁 Exited zone: ${this.currentZone.name}`);
+                        }
+                        this.currentZone = newZone;
+                    }
+                }
+            }
+
+            animate(time = 0) {
+                requestAnimationFrame(this.animate);
+
+                if (!this.isPlayingBack) {
+                    this.processFrame();
+                    statusDisplay.textContent = `Status: Tracking - Zone: ${this.currentZone ? this.currentZone.name : 'Unknown'}`;
+                } else {
+                    this.playback(time);
+                }
+                this.zones?.forEach(zone => zone.updateLabelPosition(this.camera, this.renderer));
+
+                this.controls.update();
+                this.renderer.render(this.scene, this.camera);
+            }
+            updateZoneLabels() {
+                this.zones.forEach(zone => {
+                    if (!zone.labelElement) return;
+
+                    const center = zone.getCenter();
+                    const pos = center.clone().project(this.camera);
+
+                    const x = (pos.x * 0.5 + 0.5) * this.renderer.domElement.clientWidth;
+                    const y = (-pos.y * 0.5 + 0.5) * this.renderer.domElement.clientHeight;
+
+                    zone.labelElement.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
+                    zone.labelElement.style.display = (pos.z < 1 && pos.z > -1) ? 'block' : 'none';
+                });
+            }
+
+            captureItem() {
+                const itemID = prompt('Enter Item ID:');
+                if (!itemID) return alert('Item ID is required');
+
+                this.storedItems.push({
+                    id: itemID,
+                    position: this.forkliftPos.clone(),
+                    zoneMarkerId: this.currentZoneId || 'Unknown',
+                    timestamp: new Date()
+                });
+
+                alert(`Captured ${itemID} at position (${this.forkliftPos.x.toFixed(2)}, ${this.forkliftPos.y.toFixed(2)}, ${this.forkliftPos.z.toFixed(2)}) in zone (marker ID): ${this.currentZoneId || 'Unknown'}`);
+                console.log('Stored item', itemID, 'at position', this.forkliftPos, 'in zone marker ID', this.currentZoneId);
+            }
+
+            exportTrackedPath() {
+                if (this.trackedPathPoints.length === 0) {
+                    alert('No path data to export.');
+                    return;
+                }
+
+                const exportData = this.trackedPathPoints.map(entry => ({
+                    x: entry.position.x,
+                    y: entry.position.y,
+                    z: entry.position.z,
+                    timestamp: entry.timestamp.toISOString()
+                }));
+
+                const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `forklift_path_${new Date().toISOString()}.json`;
+                a.click();
+
+                URL.revokeObjectURL(url);
+            }
+
+            saveToLocalStorage() {
+                if (this.trackedPathPoints.length === 0) {
+                    alert('No path data to save.');
+                    return;
+                }
+                try {
+                    const dataToSave = this.trackedPathPoints.map(entry => ({
+                        x: entry.position.x,
+                        y: entry.position.y,
+                        z: entry.position.z,
+                        timestamp: entry.timestamp.toISOString()
+                    }));
+                    localStorage.setItem('trackedPathData', JSON.stringify(dataToSave));
+                    alert('Path data saved to LocalStorage.');
+                } catch (e) {
+                    alert('Error saving data: ' + e.message);
+                }
+            }
+
+            loadFromLocalStorage() {
+                try {
+                    const dataString = localStorage.getItem('trackedPathData');
+                    if (!dataString) {
+                        alert('No saved path data found in LocalStorage.');
+                        return;
+                    }
+                    const loadedData = JSON.parse(dataString);
+                    if (!Array.isArray(loadedData)) throw new Error('Invalid data format.');
+
+                    // Clear current path and load
+                    this.trackedPathPoints = loadedData.map(entry => ({
+                        position: new THREE.Vector3(entry.x, entry.y, entry.z),
+                        timestamp: new Date(entry.timestamp)
+                    }));
+
+                    // Also load the last MAX_PATH_POINTS positions into the path line for rendering
+                    this.points = new Array(MAX_PATH_POINTS).fill(null);
+                    this.currentPointIndex = 0;
+                    for (const entry of this.trackedPathPoints.slice(-MAX_PATH_POINTS)) {
+                        this.updatePathLine(entry.position);
+                    }
+                    alert('Loaded path data from LocalStorage.');
+                } catch (e) {
+                    alert('Error loading data: ' + e.message);
+                }
+            }
+
+            // Playback methods
+            startPlayback() {
+                if (this.trackedPathPoints.length === 0) {
+                    alert('No path data to play back.');
+                    return;
+                }
+                this.isPlayingBack = true;
+                this.playbackIndex = 0;
+                this.playbackLine.visible = true;
+                this.playbackLastUpdateTime = 0;
+                statusDisplay.textContent = 'Status: Playback started.';
+            }
+
+            stopPlayback() {
+                this.isPlayingBack = false;
+                this.playbackLine.visible = false;
+                statusDisplay.textContent = 'Status: Playback stopped.';
+            }
+
+            playback(time) {
+                if (!this.isPlayingBack) return;
+
+                if (!this.playbackLastUpdateTime) {
+                    this.playbackLastUpdateTime = time;
+                    return;
+                }
+
+                // Advance playback index based on speed and elapsed time
+                const elapsed = (time - this.playbackLastUpdateTime) * this.playbackSpeed;
+                // Advance the index proportionally -  assume ~30 FPS so approx 33 ms per frame, we adapt:
+                const pointsToAdvance = Math.floor(elapsed / 30);
+                if (pointsToAdvance > 0) {
+                    this.playbackIndex += pointsToAdvance;
+                    this.playbackLastUpdateTime = time;
+                }
+
+                if (this.playbackIndex >= this.trackedPathPoints.length) {
+                    this.stopPlayback();
+                    return;
+                }
+
+                // Prepare playback path line geometry up to current playback index
+                const len = Math.min(this.playbackIndex, MAX_PATH_POINTS);
+                for (let i = 0; i < MAX_PATH_POINTS; i++) {
+                    let pos;
+                    if (i < len) {
+                        const p = this.trackedPathPoints[this.playbackIndex - len + i];
+                        pos = p ? p.position : new THREE.Vector3(0, 0, 0);
+                    } else {
+                        pos = new THREE.Vector3(0, 0, 0);
+                    }
+                    this.playbackLinePositions[i * 3] = pos.x;
+                    this.playbackLinePositions[i * 3 + 1] = pos.y;
+                    this.playbackLinePositions[i * 3 + 2] = pos.z;
+                }
+                this.playbackLineGeometry.attributes.position.needsUpdate = true;
+
+                // Move the camera to follow playback point (optional)
+                const currentPoint = this.trackedPathPoints[this.playbackIndex].position;
+                this.camera.position.lerp(new THREE.Vector3(currentPoint.x, currentPoint.y + 5, currentPoint.z + 10), 0.1);
+                this.camera.lookAt(currentPoint);
+            }
+
+            setPlaybackSpeed(speed) {
+                this.playbackSpeed = speed;
+            }
+        }
+
+        // ==== Setup & Initialization ====
+        const tracker = new WarehouseTracker();
+
+        // Webcam setup & start animation after video metadata ready
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    hiddenCanvas.width = video.videoWidth;
+                    hiddenCanvas.height = video.videoHeight;
+                    tracker.posit._width = hiddenCanvas.width; // update POSIT width
+                    tracker.animate();
+                    statusDisplay.textContent = 'Status: Video started, tracking...';
+                };
+            })
+            .catch(err => {
+                alert('Error accessing webcam: ' + err);
+                statusDisplay.textContent = 'Status: Webcam access denied or error.';
+            });
+
+        // ==== UI Event Listeners ====
+        captureButton.addEventListener('click', () => {
+            tracker.captureItem();
         });
 
-        alert(`Captured ${itemID} at position (${this.forkliftPos.x.toFixed(2)}, ${this.forkliftPos.y.toFixed(2)}, ${this.forkliftPos.z.toFixed(2)}) in zone (marker ID): ${this.currentZoneId || 'Unknown'}`);
-        console.log('Stored item', itemID, 'at position', this.forkliftPos, 'in zone marker ID', this.currentZoneId);
-      }
-    }
+        exportButton.addEventListener('click', () => {
+            tracker.exportTrackedPath();
+        });
 
-    // ==== Initialization ====
-    const tracker = new WarehouseTracker();
+        startPlaybackBtn.addEventListener('click', () => {
+            tracker.startPlayback();
+            startPlaybackBtn.disabled = true;
+            stopPlaybackBtn.disabled = false;
+        });
 
-    // Setup webcam feed and start animation
-    navigator.mediaDevices.getUserMedia({ video: true })
-      .then(stream => {
-        video.srcObject = stream;
-        video.onloadedmetadata = () => {
-          hiddenCanvas.width = video.videoWidth;
-          hiddenCanvas.height = video.videoHeight;
-          tracker.posit._width = hiddenCanvas.width; // update POSIT width
-          tracker.animate();
-        };
-      })
-      .catch(err => {
-        alert('Error accessing webcam: ' + err);
-      });
+        stopPlaybackBtn.addEventListener('click', () => {
+            tracker.stopPlayback();
+            startPlaybackBtn.disabled = false;
+            stopPlaybackBtn.disabled = true;
+        });
 
-    // Capture button event
-    document.getElementById('captureButton').addEventListener('click', () => {
-      const itemID = prompt('Enter Item ID:');
-      tracker.captureItem(itemID);
-    });
+        saveDataBtn.addEventListener('click', () => {
+            tracker.saveToLocalStorage();
+        });
 
-    // Handle window resizing
-    window.addEventListener('resize', () => {
-      tracker.camera.aspect = window.innerWidth / window.innerHeight;
-      tracker.camera.updateProjectionMatrix();
-      tracker.renderer.setSize(window.innerWidth, window.innerHeight);
-    });
-  </script>
+        loadDataBtn.addEventListener('click', () => {
+            tracker.loadFromLocalStorage();
+        });
+
+        speedRange.addEventListener('input', (e) => {
+            const speed = parseFloat(e.target.value);
+            tracker.setPlaybackSpeed(speed);
+            speedDisplay.textContent = speed.toFixed(1) + 'x';
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            tracker.camera.aspect = window.innerWidth / window.innerHeight;
+            tracker.camera.updateProjectionMatrix();
+            tracker.renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
 </body>
+
 </html>
