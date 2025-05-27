@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ArUco Tracker with Spaghetti Chart and Grid Helper</title>
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    canvas { display: block; }
+    #video { position: absolute; top: 0; left: 0; z-index: -1; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./three.js-dev/build/three.module.js",
+      "three/addons/": "./three.js-dev/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+    <button id="captureButton">Capture Item Location</button>
+
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
+  <canvas id="spaghettiChartCanvas"></canvas>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import AR from './js-aruco2-master/src/aruco.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // Set up Three.js
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("spaghettiChartCanvas") });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+camera.position.set(0, 10, 0);  // Top-down
+camera.up.set(0, 0, -1);        // Set Z-up for top-down feel
+camera.lookAt(0, 0, 0);         // Focus on origin
+controls.update();
+    controls.update();
+
+    // Grid
+    scene.add(new THREE.GridHelper(10, 10));
+
+    // Spaghetti line
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+    let points = [];
+    let lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+    const line = new THREE.Line(lineGeometry, lineMaterial);
+    scene.add(line);
+
+        const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
+    let markerPositions = {};
+
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => {
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          animate();
+        };
+      });
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const markers = detector.detect(imageData);
+
+        markers.forEach(marker => {
+          const id = marker.id;
+
+
+          // Get marker center
+          const markerCenter = marker.corners.reduce((sum, corner) => {
+            return sum.add(new THREE.Vector2(corner.x, corner.y));
+          }, new THREE.Vector2()).divideScalar(marker.corners.length);
+
+      
+          // Normalize position and push into 3D scene
+          const pos3D = new THREE.Vector3(
+            (markerCenter.x / canvas.width - 0.5) * 10,  // X in -5 to 5
+             0,                                         // Z = 0 plane
+            (0.5 - markerCenter.y / canvas.height) * 10 // Y in -5 to 5
+
+          );
+          points.push(pos3D);
+
+          if (points.length > 500) points.shift(); // Limit points
+
+          line.geometry.dispose();
+          line.geometry = new THREE.BufferGeometry().setFromPoints(points);
+        });
+
+        controls.update();
+        renderer.render(scene, camera);
+      }
+    }
+  </script>
+</body>
+</html>
