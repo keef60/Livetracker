@@ -2,14 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ArUco Tracker with Spaghetti Chart and Grid Helper</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ArUco Tracker with Spaghetti Chart & Zones</title>
   <style>
     body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
     canvas { display: block; }
     #video { position: absolute; top: 0; left: 0; z-index: -1; }
+    #captureButton { position: absolute; top: 10px; left: 10px; z-index: 10; padding: 8px 12px; }
   </style>
-  <script type="importmap">
+    <script type="importmap">
   {
     "imports": {
       "three": "./three.js-dev/build/three.module.js",
@@ -19,8 +20,7 @@
   </script>
 </head>
 <body>
-    <button id="captureButton">Capture Item Location</button>
-
+  <button id="captureButton">Capture Item Location</button>
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
   <canvas id="spaghettiChartCanvas"></canvas>
@@ -29,46 +29,86 @@
     import * as THREE from 'three';
     import AR from './js-aruco2-master/src/aruco.js';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import POS from './js-aruco2-master/src/posit1.js';
 
+    // Elements & contexts
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
 
-    // Set up Three.js
+    // Marker real size in meters
+    const markerSize = 0.04;
+
+    // POSIT setup
+    const posit = new POS.Posit(markerSize, canvas.width);
+
+    // Three.js setup
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("spaghettiChartCanvas") });
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('spaghettiChartCanvas') });
     renderer.setSize(window.innerWidth, window.innerHeight);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-camera.position.set(0, 10, 0);  // Top-down
-camera.up.set(0, 0, -1);        // Set Z-up for top-down feel
-camera.lookAt(0, 0, 0);         // Focus on origin
-controls.update();
+    controls.enableZoom = true;
+    controls.minDistance = 2;
+    controls.maxDistance = 50;
+
+    camera.position.set(0, 10, 20);
+    camera.up.set(0, 0, -1);
+    camera.lookAt(0, 0, 0);
     controls.update();
 
-    // Grid
     scene.add(new THREE.GridHelper(10, 10));
 
-    // Spaghetti line
+    // Forklift path line
     const lineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
     let points = [];
     let lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
     const line = new THREE.Line(lineGeometry, lineMaterial);
     scene.add(line);
 
-        const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
-    let markerPositions = {};
+    // ArUco detector
+    const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
 
+    // Forklift position vector
+    const forkliftPos = new THREE.Vector3();
+
+    // Smoothing variables
+    let smoothedPos = null;
+    const smoothingAlpha = 0.2; // EMA smoothing factor
+    const maxDistanceJump = 1.5; // max allowed jump between frames to avoid outliers
+
+    // Current zone marker id (null if none)
+    let currentZoneId = null;
+
+    // Store captured items here
+    const storedItems = [];
+
+    // Access webcam
     navigator.mediaDevices.getUserMedia({ video: true })
       .then(stream => {
         video.srcObject = stream;
         video.onloadedmetadata = () => {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
+          posit._width = canvas.width; // update POSIT width
           animate();
         };
+      })
+      .catch(err => {
+        alert('Error accessing webcam: ' + err);
       });
+
+    // Estimate pose with POSIT for each marker
+    function estimatePose(marker) {
+      const corners = marker.corners.map(c => ({ x: c.x, y: c.y }));
+      const pose = posit.pose(corners);
+      if (!pose || !pose.bestRotation || !pose.bestTranslation) return null;
+      return {
+        translation: pose.bestTranslation,
+        rotation: pose.bestRotation
+      };
+    }
 
     function animate() {
       requestAnimationFrame(animate);
@@ -78,35 +118,89 @@ controls.update();
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const markers = detector.detect(imageData);
 
+        let sumPos = new THREE.Vector3(0, 0, 0);
+        let totalWeight = 0;
+        let closestMarker = null;
+        let closestZ = Infinity;
+
         markers.forEach(marker => {
-          const id = marker.id;
+          const pose = estimatePose(marker);
+          if (!pose) return;
 
+          const t = pose.translation;
+          if (
+            isNaN(t[0]) || isNaN(t[1]) || isNaN(t[2]) ||
+            !isFinite(t[0]) || !isFinite(t[1]) || !isFinite(t[2])
+          ) return;
 
-          // Get marker center
-          const markerCenter = marker.corners.reduce((sum, corner) => {
-            return sum.add(new THREE.Vector2(corner.x, corner.y));
-          }, new THREE.Vector2()).divideScalar(marker.corners.length);
+          const pos = new THREE.Vector3(t[0], -t[1], -t[2]);
+          if (isNaN(pos.z) || !isFinite(pos.z)) return;
 
-      
-          // Normalize position and push into 3D scene
-          const pos3D = new THREE.Vector3(
-            (markerCenter.x / canvas.width - 0.5) * 10,  // X in -5 to 5
-             0,                                         // Z = 0 plane
-            (0.5 - markerCenter.y / canvas.height) * 10 // Y in -5 to 5
+          // Accumulate for average pose
+          sumPos.add(pos);
+          totalWeight++;
 
-          );
-          points.push(pos3D);
+          if (pos.z < closestZ) {
+            closestZ = pos.z;
+            closestMarker = marker;
+          }
+        });
 
-          if (points.length > 500) points.shift(); // Limit points
+        if (closestMarker) {
+          currentZoneId = closestMarker.id;
+        } else {
+          currentZoneId = null;
+        }
+
+        if (totalWeight > 0) {
+          const avgPos = sumPos.divideScalar(totalWeight);
+
+          if (!smoothedPos) {
+            smoothedPos = avgPos.clone();
+          } else {
+            if (smoothedPos.distanceTo(avgPos) > maxDistanceJump) {
+              // Skip big jumps (likely outliers)
+              console.warn('Outlier detected, skipping frame');
+            } else {
+              smoothedPos.lerp(avgPos, smoothingAlpha);
+            }
+          }
+
+          forkliftPos.copy(smoothedPos);
+
+          // Bonus tip: push every frame for smooth continuous line
+          points.push(forkliftPos.clone());
+          if (points.length > 500) points.shift();
 
           line.geometry.dispose();
           line.geometry = new THREE.BufferGeometry().setFromPoints(points);
-        });
+        }
 
         controls.update();
         renderer.render(scene, camera);
       }
     }
+
+    document.getElementById('captureButton').addEventListener('click', () => {
+      const itemID = prompt('Enter Item ID:');
+      if (!itemID) return alert('Item ID is required');
+
+      storedItems.push({
+        id: itemID,
+        position: forkliftPos.clone(),
+        zoneMarkerId: currentZoneId || 'Unknown',
+        timestamp: new Date()
+      });
+
+      alert(`Captured ${itemID} at position (${forkliftPos.x.toFixed(2)}, ${forkliftPos.y.toFixed(2)}, ${forkliftPos.z.toFixed(2)}) in zone (marker ID): ${currentZoneId || 'Unknown'}`);
+      console.log('Stored item', itemID, 'at position', forkliftPos, 'in zone marker ID', currentZoneId);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
   </script>
 </body>
 </html>
