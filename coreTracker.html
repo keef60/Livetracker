@@ -138,137 +138,137 @@
         const statusDisplay = document.getElementById('status');
 
         // === Zone Class ===
-class Zone {
-    constructor({ id, name, bounds, points2D = [], color = 0x00ff00 }) {
-        this.id = id;
-        this.name = name;
-        this.bounds = {
-            min: new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z),
-            max: new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z),
-        };
-        this.points2D = points2D; // Optional polygon shape in xz-plane
-        this.color = color;
+        class Zone {
+            constructor({ id, name, bounds, points2D = [], color = 0x00ff00 }) {
+                this.id = id;
+                this.name = name;
+                this.bounds = {
+                    min: new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z),
+                    max: new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z),
+                };
+                this.points2D = points2D; // Optional polygon shape in xz-plane
+                this.color = color;
 
-        this.mesh = null;
-        this.labelElement = null;
-        this.spriteLabel = null;
-    }
+                this.mesh = null;
+                this.labelElement = null;
+                this.spriteLabel = null;
+            }
 
-    // Compute center of zone (average of points2D or bounds)
-    getCenter() {
-        if (this.points2D.length > 0) {
-            let sumX = 0, sumZ = 0;
-            this.points2D.forEach(p => {
-                sumX += p.x;
-                sumZ += p.z;
-            });
-            return new THREE.Vector3(sumX / this.points2D.length, this.bounds.max.y, sumZ / this.points2D.length);
-        } else {
-            return new THREE.Vector3().addVectors(this.bounds.min, this.bounds.max).multiplyScalar(0.5);
-        }
-    }
-
-    // Create 2D label using CSS2D
-    createSpriteLabel() {
-        const div = document.createElement('div');
-        div.className = 'zone-label';
-        div.textContent = this.name;
-
-        div.style.padding = '4px 10px';
-        div.style.background = 'rgba(0, 128, 0, 0.6)';
-        div.style.color = 'white';
-        div.style.borderRadius = '5px';
-        div.style.fontSize = '14px';
-        div.style.fontWeight = 'bold';
-
-        const label = new CSS2DObject(div);
-        const center = this.getCenter();
-        label.position.set(center.x, center.y + 0.5, center.z);
-
-        this.spriteLabel = label;
-        this.labelElement = div;
-
-        return label;
-    }
-
-    // Create visual 3D mesh (box if no polygon, shape if polygon)
-    createMesh() {
-        let mesh;
-        if (this.points2D.length >= 3) {
-            // Create polygonal shape
-            const shape = new THREE.Shape();
-            this.points2D.forEach((p, i) => {
-                if (i === 0) {
-                    shape.moveTo(p.x, p.z);
+            // Compute center of zone (average of points2D or bounds)
+            getCenter() {
+                if (this.points2D.length > 0) {
+                    let sumX = 0, sumZ = 0;
+                    this.points2D.forEach(p => {
+                        sumX += p.x;
+                        sumZ += p.z;
+                    });
+                    return new THREE.Vector3(sumX / this.points2D.length, this.bounds.max.y, sumZ / this.points2D.length);
                 } else {
-                    shape.lineTo(p.x, p.z);
+                    return new THREE.Vector3().addVectors(this.bounds.min, this.bounds.max).multiplyScalar(0.5);
                 }
-            });
+            }
 
-            const geometry = new THREE.ShapeGeometry(shape);
-            geometry.rotateX(-Math.PI / 2); // Lay flat on XZ
-            const material = new THREE.MeshBasicMaterial({
-                color: this.color,
-                transparent: true,
-                opacity: 0.4,
-                side: THREE.DoubleSide
-            });
+            // Create 2D label using CSS2D
+            createSpriteLabel() {
+                const div = document.createElement('div');
+                div.className = 'zone-label';
+                div.textContent = this.name;
 
-            mesh = new THREE.Mesh(geometry, material);
-            mesh.position.y = this.bounds.min.y; // ground level
-        } else {
-            // Fallback to box
-            const size = new THREE.Vector3().subVectors(this.bounds.max, this.bounds.min);
-            const center = this.getCenter();
-            const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
-            const material = new THREE.MeshBasicMaterial({
-                color: this.color,
-                transparent: true,
-                opacity: 0.2
-            });
-            mesh = new THREE.Mesh(geometry, material);
-            mesh.position.copy(center);
+                div.style.padding = '4px 10px';
+                div.style.background = 'rgba(0, 128, 0, 0.6)';
+                div.style.color = 'white';
+                div.style.borderRadius = '5px';
+                div.style.fontSize = '14px';
+                div.style.fontWeight = 'bold';
+
+                const label = new CSS2DObject(div);
+                const center = this.getCenter();
+                label.position.set(center.x, center.y + 0.5, center.z);
+
+                this.spriteLabel = label;
+                this.labelElement = div;
+
+                return label;
+            }
+
+            // Create visual 3D mesh (box if no polygon, shape if polygon)
+            createMesh() {
+                let mesh;
+                if (this.points2D.length >= 3) {
+                    // Create polygonal shape
+                    const shape = new THREE.Shape();
+                    this.points2D.forEach((p, i) => {
+                        if (i === 0) {
+                            shape.moveTo(p.x, p.z);
+                        } else {
+                            shape.lineTo(p.x, p.z);
+                        }
+                    });
+
+                    const geometry = new THREE.ShapeGeometry(shape);
+                    geometry.rotateX(-Math.PI / 2); // Lay flat on XZ
+                    const material = new THREE.MeshBasicMaterial({
+                        color: this.color,
+                        transparent: true,
+                        opacity: 0.4,
+                        side: THREE.DoubleSide
+                    });
+
+                    mesh = new THREE.Mesh(geometry, material);
+                    mesh.position.y = this.bounds.min.y; // ground level
+                } else {
+                    // Fallback to box
+                    const size = new THREE.Vector3().subVectors(this.bounds.max, this.bounds.min);
+                    const center = this.getCenter();
+                    const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+                    const material = new THREE.MeshBasicMaterial({
+                        color: this.color,
+                        transparent: true,
+                        opacity: 0.2
+                    });
+                    mesh = new THREE.Mesh(geometry, material);
+                    mesh.position.copy(center);
+                }
+
+                mesh.name = `Zone-${this.id}`;
+                this.mesh = mesh;
+                return mesh;
+            }
+
+            addToScene(scene) {
+                if (!this.mesh) this.createMesh();
+                scene.add(this.mesh);
+
+                if (!this.spriteLabel) {
+                    this.createSpriteLabel();
+                }
+                scene.add(this.spriteLabel);
+            }
+
+            setHighlighted(isHighlighted) {
+                if (this.mesh) {
+                    this.mesh.material.opacity = isHighlighted ? 0.8 : 0.4;
+                    this.mesh.material.color.setHex(isHighlighted ? 0xffff00 : this.color);
+                }
+            }
+
+            setVisible(visible) {
+                if (this.mesh) this.mesh.visible = visible;
+                if (this.labelElement) this.labelElement.style.display = visible ? 'block' : 'none';
+            }
+
+            contains(position) {
+                return (
+                    position.x >= this.bounds.min.x && position.x <= this.bounds.max.x &&
+                    position.y >= this.bounds.min.y && position.y <= this.bounds.max.y &&
+                    position.z >= this.bounds.min.z && position.z <= this.bounds.max.z
+                );
+            }
+
+            toString() {
+                return `Zone ${this.id} [${this.name}] from ${this.bounds.min.toArray()} to ${this.bounds.max.toArray()}`;
+            }
         }
-
-        mesh.name = `Zone-${this.id}`;
-        this.mesh = mesh;
-        return mesh;
-    }
-
-    addToScene(scene) {
-        if (!this.mesh) this.createMesh();
-        scene.add(this.mesh);
-
-        if (!this.spriteLabel) {
-            this.createSpriteLabel();
-        }
-        scene.add(this.spriteLabel);
-    }
-
-    setHighlighted(isHighlighted) {
-        if (this.mesh) {
-            this.mesh.material.opacity = isHighlighted ? 0.8 : 0.4;
-            this.mesh.material.color.setHex(isHighlighted ? 0xffff00 : this.color);
-        }
-    }
-
-    setVisible(visible) {
-        if (this.mesh) this.mesh.visible = visible;
-        if (this.labelElement) this.labelElement.style.display = visible ? 'block' : 'none';
-    }
-
-    contains(position) {
-        return (
-            position.x >= this.bounds.min.x && position.x <= this.bounds.max.x &&
-            position.y >= this.bounds.min.y && position.y <= this.bounds.max.y &&
-            position.z >= this.bounds.min.z && position.z <= this.bounds.max.z
-        );
-    }
-
-    toString() {
-        return `Zone ${this.id} [${this.name}] from ${this.bounds.min.toArray()} to ${this.bounds.max.toArray()}`;
-    }
-}
 
         // ==== Tracker Class ====
         class WarehouseTracker {
@@ -373,12 +373,12 @@ class Zone {
                             }
                         },
                         "points2D": [
-                            
+
                         ],
                         "color": 15523448
                     },
                 ];
-                const zones = zoneData.map(zone => {return new Zone(zone) });
+                const zones = zoneData.map(zone => { return new Zone(zone) });
                 zones.forEach(zone => zone.addToScene(this.scene));
 
                 return zones;
@@ -582,17 +582,119 @@ class Zone {
             }
 
             captureItem() {
-
                 const itemID = prompt('Enter Item ID:');
                 if (!itemID) return alert('Item ID is required');
 
+                const levels = {
+                    floor: 0,
+                    mid: 1.5,
+                    top: 3
+                };
+
+                const level = prompt('Enter level (floor, mid, top):', 'floor').toLowerCase();
+                const yOffset = levels[level];
+                if (yOffset === undefined) {
+                    alert('Invalid level. Please enter "floor", "mid", or "top".');
+                    return;
+                }
+
+                const zone = this.currentZone;
+                if (!zone) {
+                    alert('No zone detected.');
+                    return;
+                }
+
+                const forkliftPos = this.forkliftPos.clone();
+
+                // Parameters for rack rows
+                const rowSpacingX = 0.35;  // Distance between items horizontally in a rack row
+                const rowSpacingZ = 0.4;   // Distance between rows in a rack (depth)
+                const maxItemsPerRow = 5;
+
+                let itemPosition;
+
+                if (level === 'floor') {
+                    // FLOOR LEVEL (outside racks)
+                    // Position exactly at forklift, but prevent overlap with existing floor items in same zone
+
+                    // Check for existing floor items in the same zone close to forklift position (within item size)
+                    const collision = this.storedItems.some(item =>
+                        item.zone === zone.name &&
+                        item.level === 'floor' &&
+                        item.position.distanceTo(forkliftPos) < 0.3 // Assuming item size ~0.3
+                    );
+
+                    if (collision) {
+                        alert('An item already exists at this floor position.');
+                        return;
+                    }
+
+                    // Use forklift exact X,Z but floor Y
+                    itemPosition = new THREE.Vector3(forkliftPos.x, yOffset, forkliftPos.z);
+
+                } else {
+                    // MID or TOP LEVEL (inside rack)
+
+                    // Snap forklift position to nearest rack grid row and column
+
+                    // Calculate row (along Z axis) and slot (along X axis) indexes inside rack
+                    const rowIndex = Math.round(forkliftPos.z / rowSpacingZ);
+                    const slotIndex = Math.round(forkliftPos.x / rowSpacingX);
+
+                    // Count how many items already in this row at this level and zone
+                    const itemsInRow = this.storedItems.filter(item =>
+                        item.zone === zone.name &&
+                        item.level === level &&
+                        Math.round(item.position.z / rowSpacingZ) === rowIndex
+                    );
+
+                    if (itemsInRow.length >= maxItemsPerRow) {
+                        alert(`Rack row ${rowIndex} at level ${level} is full.`);
+                        return;
+                    }
+
+                    // Place item in the next available slot in that row
+                    // Find next free slotIndex in row (preferably forklift aligned slot if free)
+                    const slotTaken = itemsInRow.some(item =>
+                        Math.round(item.position.x / rowSpacingX) === slotIndex
+                    );
+
+                    let finalSlotIndex = slotIndex;
+                    if (slotTaken) {
+                        // Find next free slot in this row up to maxItemsPerRow
+                        for (let i = 0; i < maxItemsPerRow; i++) {
+                            if (!itemsInRow.some(item => Math.round(item.position.x / rowSpacingX) === i)) {
+                                finalSlotIndex = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    itemPosition = new THREE.Vector3(finalSlotIndex * rowSpacingX, yOffset, rowIndex * rowSpacingZ);
+
+                    // Just in case, double check no collision at this position
+                    const collision = this.storedItems.some(item =>
+                        item.zone === zone.name &&
+                        item.level === level &&
+                        item.position.equals(itemPosition)
+                    );
+
+                    if (collision) {
+                        alert('An item already exists at this rack position.');
+                        return;
+                    }
+                }
+
+                // Add item to stored items
                 this.storedItems.push({
                     id: itemID,
-                    position: this.forkliftPos.clone(),
-                    zone: this.currentZone?.name || 'Unknown',
+                    position: itemPosition.clone(),
+                    zone: zone.name,
+                    level: level,
                     timestamp: new Date()
                 });
 
+                // Create label div
                 const labelDiv = document.createElement('div');
                 labelDiv.className = 'label';
                 labelDiv.textContent = itemID;
@@ -603,22 +705,19 @@ class Zone {
                 labelDiv.style.borderRadius = '4px';
                 labelDiv.style.fontSize = '12px';
 
+                // Create label and item mesh
                 const label = new CSS2DObject(labelDiv);
-                label.position.set(0, 0.4, 0); // above the item box
+                label.position.set(0, 0.4, 0);
 
-                // Create visual marker in 3D
                 const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3);
                 const material = new THREE.MeshBasicMaterial({ color: 0x00ffcc });
                 const box = new THREE.Mesh(geometry, material);
-                box.position.copy(this.forkliftPos);
+                box.position.copy(itemPosition);
                 box.name = `Item-${itemID}`;
                 this.scene.add(box);
-                box.add(label); // attach label to mesh
-
-
-                alert(`Captured item '${itemID}' at ${box.position.toArray().map(n => n.toFixed(2)).join(', ')}`);
-
+                box.add(label);
             }
+
 
             exportTrackedPath() {
                 if (this.trackedPathPoints.length === 0) {
