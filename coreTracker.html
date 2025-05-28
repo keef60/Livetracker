@@ -108,6 +108,29 @@
         <label for="speedRange">Playback Speed: <span id="speedDisplay">1x</span></label>
         <input type="range" id="speedRange" min="0.1" max="5" step="0.1" value="1" />
         <div id="status">Status: Waiting for video...</div>
+
+        <hr>
+        <label for="zoneFilter">Filter by Zone:</label>
+        <select id="zoneFilter">
+            <option value="">All Zones</option>
+            <option value="2">Packing</option>
+            <!-- Add other zone options here -->
+        </select>
+
+        <label for="levelFilter">Filter by Level:</label>
+        <select id="levelFilter">
+            <option value="">All Levels</option>
+            <option value="floor">Floor</option>
+            <option value="mid">Mid</option>
+            <option value="top">Top</option>
+        </select>
+
+        <button id="filterItemsBtn">Filter Items</button>
+
+        <input type="text" id="searchItemInput" placeholder="Enter Item ID" />
+        <button id="searchItemBtn">Search Item</button>
+
+
     </div>
 
 
@@ -294,6 +317,8 @@
                 this.renderer.setSize(window.innerWidth, window.innerHeight);
                 this.renderer.setClearColor(0x111111);
 
+                this.itemMeshes = [];
+
 
                 this.labelRenderer = new CSS2DRenderer();
                 this.labelRenderer.setSize(window.innerWidth, window.innerHeight);
@@ -301,7 +326,6 @@
                 this.labelRenderer.domElement.style.top = '0';
                 this.labelRenderer.domElement.style.pointerEvents = 'none';
                 document.body.appendChild(this.labelRenderer.domElement);
-
 
                 this.controls = new OrbitControls(this.camera, this.renderer.domElement);
                 this.controls.enableZoom = true;
@@ -366,8 +390,8 @@
             createZones() {
                 const zoneData = [
                     {
-                        "id": 1,
-                        "name": "Zone 1",
+                        "id": 2,
+                        "name": "Packing",
                         "bounds": {
                             "min": {
                                 "x": 5.3333330154419,
@@ -383,8 +407,8 @@
                         "points2D": [
 
                         ],
-                        "color": 15523448
-                    },
+                        "color": 11822397
+                    }
                 ];
                 const zones = zoneData.map(zone => { return new Zone(zone) });
                 zones.forEach(zone => zone.addToScene(this.scene));
@@ -615,7 +639,7 @@
                 const forkliftPos = this.forkliftPos.clone();
 
                 // Parameters for rack rows
-                const rowSpacingX = 0.35;  // Distance between items horizontally in a rack row
+                const rowSpacingX = 0.7;  // Distance between items horizontally in a rack row
                 const rowSpacingZ = 0.4;   // Distance between rows in a rack (depth)
                 const maxItemsPerRow = 5;
 
@@ -724,10 +748,9 @@
                 box.name = `Item-${itemID}`;
                 this.scene.add(box);
                 box.add(label);
+                this.itemMeshes.push(box); // After this.scene.add(box)
 
-                console.log(itemPosition)
             }
-
 
             exportTrackedPath() {
                 if (this.trackedPathPoints.length === 0) {
@@ -900,6 +923,25 @@
                 this.controls.update();
             }
 
+            filterItemsByZone(zoneId) {
+                return this.storedItems.filter(item => item.zoneId === zoneId);
+            }
+
+            filterItemsByLevel(level) {
+                return this.storedItems.filter(item => item.level === level);
+            }
+
+            filterItemsByTime(startTime, endTime) {
+                return this.storedItems.filter(item => {
+                    const time = new Date(item.timestamp).getTime();
+                    return time >= new Date(startTime).getTime() && time <= new Date(endTime).getTime();
+                });
+            }
+
+            filterItemsByZoneAndLevel(zoneId, level) {
+                return this.storedItems.filter(item => item.zoneId === zoneId && item.level === level);
+            }
+
         }
 
         // ==== Setup & Initialization ====
@@ -957,11 +999,81 @@
             speedDisplay.textContent = speed.toFixed(1) + 'x';
         });
 
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        window.addEventListener('click', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, tracker.camera);
+
+            const intersects = raycaster.intersectObjects(tracker.itemMeshes);
+            if (intersects.length > 0) {
+                const mesh = intersects[0].object;
+                const itemId = mesh.name.replace('Item-', '');
+                alert(`📦 Clicked Item ID: ${itemId}`);
+
+                // Optional: highlight clicked item
+                mesh.material.color.set(0xffff00); // highlight yellow
+
+                // Optional: reset others
+                tracker.itemMeshes.forEach(itemMesh => {
+                    if (itemMesh !== mesh) {
+                        itemMesh.material.color.set(0x00ffcc); // default color
+                    }
+                });
+            }
+        });
+        document.getElementById('searchItemBtn').addEventListener('click', () => {
+            const searchId = document.getElementById('searchItemInput').value.trim();
+            if (!searchId) return alert('Please enter an Item ID.');
+
+            const match = tracker.itemMeshes.find(mesh => mesh.name === `Item-${searchId}`);
+            if (match) {
+                match.material.color.set(0x00ff00); // green highlight
+                tracker.camera.position.set(match.position.x, match.position.y + 5, match.position.z + 5);
+                tracker.camera.lookAt(match.position);
+
+                // Reset others
+                tracker.itemMeshes.forEach(mesh => {
+                    if (mesh !== match) mesh.material.color.set(0x00ffcc);
+                });
+            } else {
+                alert(`Item ID ${searchId} not found.`);
+            }
+        });
+
+
         document.getElementById('btnTopView').onclick = () => tracker.setDefaultView('top');
         document.getElementById('btnFrontView').onclick = () => tracker.setDefaultView('front');
         document.getElementById('btnSideView').onclick = () => tracker.setDefaultView('side');
         document.getElementById('btnIsoView').onclick = () => tracker.setDefaultView('isometric');
+        document.getElementById('filterItemsBtn').addEventListener('click', () => {
+            const zoneValue = document.getElementById('zoneFilter').value;
+            const levelValue = document.getElementById('levelFilter').value;
 
+            let filteredItems = tracker.storedItems;
+
+            if (zoneValue) {
+                filteredItems = filteredItems.filter(item => item.zoneId === parseInt(zoneValue));
+            }
+
+            if (levelValue) {
+                filteredItems = filteredItems.filter(item => item.level === levelValue);
+            }
+
+            console.log('Filtered Items:', filteredItems);
+
+            // Optional: Highlight filtered items in the scene
+            tracker.scene.children.forEach(obj => {
+                if (obj.isMesh && obj.name.startsWith('Item-')) {
+                    const match = filteredItems.find(item => obj.name === `Item-${item.id}`);
+                    obj.material.color.set(match ? 0xffff00 : 0x00ffcc); // yellow highlight if matched
+                }
+            });
+        });
 
         // Handle window resize
         window.addEventListener('resize', () => {
