@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Zone Editor with Labels and Dimensions</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    margin: 10px;
+    background: #f0f0f0;
+  }
+  #container {
+    border: 1px solid #ccc;
+    margin-top: 10px;
+    background: white;
+    width: 900px;
+    height: 600px;
+  }
+  #controls {
+    margin-bottom: 10px;
+  }
+  button {
+    margin-left: 10px;
+  }
+  #areaDisplay {
+    margin-top: 10px;
+    font-weight: bold;
+  }
+  /* Simple input for editing label */
+  #labelInput {
+    position: absolute;
+    display: none;
+    border: 1px solid #666;
+    font-size: 14px;
+    padding: 2px 5px;
+    background: white;
+    z-index: 10;
+  }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/konva@8.4.3/konva.min.js"></script>
+</head>
+<body>
+
+<h2>Zone Editor with Floor Layout, Labels & Dimensions</h2>
+<div id="controls">
+  <label for="floorImageInput">Load Floor Layout:</label>
+  <input type="file" id="floorImageInput" accept="image/*" />
+  <button id="finishPolygonBtn" disabled>Finish Polygon</button>
+  <button id="deleteZoneBtn" disabled>Delete Selected Zone</button>
+  <button id="exportZonesBtn">Export Zones</button>
+
+</div>
+
+<div id="container"></div>
+<div id="areaDisplay">Area: N/A</div>
+
+<!-- Hidden input for editing label text -->
+<input type="text" id="labelInput" />
+
+<script>
+class ZoneEditor {
+  constructor(containerId) {
+    this.stage = new Konva.Stage({
+      container: containerId,
+      width: 900,
+      height: 600,
+    });
+    this.layer = new Konva.Layer();
+    this.stage.add(this.layer);
+
+    this.backgroundImage = null;
+
+    this.currentPolygonPoints = [];
+    this.currentLine = null;
+    this.polygonShapes = []; // store polygon groups (shape + anchors + label)
+    this.selectedPolygon = null;
+    this.zoneCount = 0;
+
+    this.initUI();
+    this.bindStageEvents();
+  }
+
+  initUI() {
+    this.finishBtn = document.getElementById('finishPolygonBtn');
+    this.deleteBtn = document.getElementById('deleteZoneBtn');
+    const floorImageInput = document.getElementById('floorImageInput');
+    this.areaDisplay = document.getElementById('areaDisplay');
+    this.labelInput = document.getElementById('labelInput');
+
+    this.finishBtn.addEventListener('click', () => this.finishPolygon());
+    this.deleteBtn.addEventListener('click', () => this.deleteSelectedPolygon());
+    floorImageInput.addEventListener('change', (e) => this.loadBackgroundImage(e));
+
+    // Label input events
+    this.labelInput.addEventListener('blur', () => this.hideLabelInput());
+    this.labelInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.hideLabelInput();
+      }
+    });
+  }
+
+  
+  loadBackgroundImage(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const imgObj = new Image();
+      imgObj.onload = () => {
+        if (this.backgroundImage) {
+          this.backgroundImage.destroy();
+        }
+        this.backgroundImage = new Konva.Image({
+          x: 0,
+          y: 0,
+          image: imgObj,
+          width: this.stage.width(),
+          height: this.stage.height(),
+          listening: false,
+        });
+        this.layer.add(this.backgroundImage);
+        this.backgroundImage.moveToBottom();
+        this.layer.draw();
+      };
+      imgObj.src = evt.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  bindStageEvents() {
+    this.stage.on('click', (e) => {
+      // ignore click if it's on a polygon or anchor
+      if (e.target !== this.stage) return;
+
+      // Add point to current polygon
+      const mousePos = this.stage.getPointerPosition();
+      this.currentPolygonPoints.push(mousePos.x, mousePos.y);
+      this.drawCurrentLine();
+      this.finishBtn.disabled = this.currentPolygonPoints.length < 6; // at least 3 points
+    });
+  }
+
+  drawCurrentLine() {
+    if (this.currentLine) {
+      this.currentLine.points(this.currentPolygonPoints);
+    } else {
+      this.currentLine = new Konva.Line({
+        points: this.currentPolygonPoints,
+        stroke: 'red',
+        strokeWidth: 2,
+        lineCap: 'round',
+        lineJoin: 'round',
+      });
+      this.layer.add(this.currentLine);
+    }
+    this.layer.draw();
+  }
+
+  finishPolygon() {
+    if (this.currentPolygonPoints.length < 6) {
+      alert('At least 3 points required to finish polygon.');
+      return;
+    }
+    this.zoneCount++;
+
+    const polygonGroup = new Konva.Group({ draggable: true });
+
+    const polygon = new Konva.Line({
+      points: this.currentPolygonPoints,
+      fill: 'rgba(0, 128, 255, 0.4)',
+      stroke: 'blue',
+      strokeWidth: 2,
+      closed: true,
+    });
+    polygonGroup.add(polygon);
+
+    // Create anchors
+    for (let i = 0; i < this.currentPolygonPoints.length; i += 2) {
+      const anchor = this.createAnchor(
+        this.currentPolygonPoints[i],
+        this.currentPolygonPoints[i + 1],
+        polygonGroup,
+        i / 2
+      );
+      polygonGroup.add(anchor);
+    }
+
+    // Create label text with default zone name and area
+    const label = new Konva.Text({
+      x: this.currentPolygonPoints[0],
+      y: this.currentPolygonPoints[1] - 20,
+      text: `Zone ${this.zoneCount}\nArea: ${this.calculatePolygonArea(this.currentPolygonPoints).toFixed(2)} px²`,
+      fontSize: 16,
+      fontFamily: 'Calibri',
+      fill: 'black',
+      padding: 5,
+      align: 'center',
+      draggable: true,
+    });
+    polygonGroup.add(label);
+
+    // Label double-click to edit
+    label.on('dblclick', () => this.editLabel(label, polygonGroup));
+
+    polygonGroup.on('click', (e) => {
+      e.cancelBubble = true; // prevent stage click
+      this.selectPolygon(polygonGroup);
+    });
+
+    this.layer.add(polygonGroup);
+    this.polygonShapes.push(polygonGroup);
+
+    // Reset current polygon points and line
+    this.currentPolygonPoints = [];
+    if (this.currentLine) {
+      this.currentLine.destroy();
+      this.currentLine = null;
+    }
+    this.finishBtn.disabled = true;
+
+    this.selectPolygon(polygonGroup);
+    this.layer.draw();
+  }
+
+  createAnchor(x, y, polygonGroup, index) {
+    const anchor = new Konva.Circle({
+      x,
+      y,
+      radius: 6,
+      fill: 'white',
+      stroke: 'blue',
+      strokeWidth: 2,
+      draggable: true,
+      dragOnTop: false,
+    });
+
+    anchor.on('dragmove', () => {
+      const polygon = polygonGroup.findOne('Line');
+      const points = polygon.points().slice();
+
+      points[index * 2] = anchor.x();
+      points[index * 2 + 1] = anchor.y();
+      polygon.points(points);
+
+      this.updateLabel(polygonGroup);
+      this.layer.batchDraw();
+    });
+
+    anchor.on('mousedown touchstart', (e) => {
+      e.cancelBubble = true;
+    });
+
+    return anchor;
+  }
+
+  selectPolygon(polygonGroup) {
+    if (this.selectedPolygon) {
+      const oldPolygon = this.selectedPolygon.findOne('Line');
+      oldPolygon.stroke('blue');
+      this.selectedPolygon.find('Circle').forEach(anchor => anchor.stroke('blue'));
+      this.selectedPolygon.findOne('Text').fill('black');
+    }
+
+    this.selectedPolygon = polygonGroup;
+
+    const polygon = polygonGroup.findOne('Line');
+    polygon.stroke('red');
+    polygonGroup.find('Circle').forEach(anchor => anchor.stroke('red'));
+    polygonGroup.findOne('Text').fill('red');
+
+    this.deleteBtn.disabled = false;
+    this.updateAreaDisplay(polygon);
+    this.layer.draw();
+  }
+
+  deleteSelectedPolygon() {
+    if (!this.selectedPolygon) return;
+
+    this.selectedPolygon.destroy();
+    this.polygonShapes = this.polygonShapes.filter(pg => pg !== this.selectedPolygon);
+    this.selectedPolygon = null;
+    this.deleteBtn.disabled = true;
+    this.areaDisplay.textContent = 'Area: N/A';
+
+    this.layer.draw();
+  }
+
+  updateAreaDisplay(polygon) {
+    const area = this.calculatePolygonArea(polygon.points());
+    this.areaDisplay.textContent = `Area: ${area.toFixed(2)} px²`;
+  }
+
+  updateLabel(polygonGroup) {
+    const polygon = polygonGroup.findOne('Line');
+    const label = polygonGroup.findOne('Text');
+    const points = polygon.points();
+
+    // Update label text with area (keep name)
+    const lines = label.text().split('\n');
+    const name = lines[0] || 'Zone';
+    const area = this.calculatePolygonArea(points).toFixed(2);
+    label.text(`${name}\nArea: ${area} px²`);
+
+    // Move label near first vertex (can be dragged independently)
+    if (!label.isDragging()) {
+      label.position({ x: points[0], y: points[1] - 20 });
+    }
+  }
+
+  editLabel(label, polygonGroup) {
+    // Show an input box over the label for editing text
+    const absPos = label.getAbsolutePosition();
+    const containerPos = this.stage.container().getBoundingClientRect();
+
+    this.labelInput.style.display = 'block';
+    this.labelInput.style.left = containerPos.left + absPos.x + 'px';
+    this.labelInput.style.top = containerPos.top + absPos.y + 'px';
+    this.labelInput.style.width = label.width() + 20 + 'px';
+    this.labelInput.style.height = label.height() + 10 + 'px';
+    this.labelInput.value = label.text().split('\n')[0]; // zone name only
+    this.labelInput.focus();
+
+    this.labelInput.oninput = () => {
+      const newName = this.labelInput.value || 'Zone';
+      const areaText = label.text().split('\n')[1] || '';
+      label.text(`${newName}\n${areaText}`);
+      this.layer.batchDraw();
+    };
+
+    this.currentEditingLabel = label;
+    this.currentEditingGroup = polygonGroup;
+  }
+
+exportZones() {
+  const zoneData = this.polygonShapes.map((group, i) => {
+    const polygon = group.findOne('Line');
+    const label = group.findOne('Text');
+    const name = label.text().split('\n')[0];
+    const points = polygon.points();
+
+    // Convert flat [x, y, x, y, ...] into 2D polygon points (x, z)
+    const coords = [];
+    for (let j = 0; j < points.length; j += 2) {
+      coords.push({ x: points[j], z: points[j + 1] });
+    }
+
+    const minX = Math.min(...coords.map(p => p.x));
+    const maxX = Math.max(...coords.map(p => p.x));
+    const minZ = Math.min(...coords.map(p => p.z));
+    const maxZ = Math.max(...coords.map(p => p.z));
+
+    return {
+      id: i + 1,
+      name,
+      bounds: {
+        min: { x: minX, y: 0, z: minZ },
+        max: { x: maxX, y: 3, z: maxZ }
+      },
+      points2D: coords,
+      color: Math.floor(Math.random() * 0xffffff)
+    };
+  });
+
+  const blob = new Blob([JSON.stringify(zoneData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'zones_with_shapes.json';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+
+  hideLabelInput() {
+    if (!this.currentEditingLabel) return;
+
+    this.labelInput.style.display = 'none';
+    this.currentEditingLabel = null;
+    this.currentEditingGroup = null;
+  }
+
+  // Shoelace formula for polygon area
+  calculatePolygonArea(points) {
+    let area = 0;
+    const n = points.length / 2;
+    for (let i = 0; i < n; i++) {
+      const x1 = points[2 * i];
+      const y1 = points[2 * i + 1];
+      const x2 = points[2 * ((i + 1) % n)];
+      const y2 = points[2 * ((i + 1) % n) + 1];
+      area += x1 * y2 - x2 * y1;
+    }
+    return Math.abs(area / 2);
+  }
+}
+
+window.onload = () => {
+  const editor = new ZoneEditor('container');
+
+  
+  document.getElementById('exportZonesBtn').addEventListener('click', () => {
+    editor.exportZones();
+  });
+};
+</script>
+
+</body>
+</html>
