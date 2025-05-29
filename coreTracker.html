@@ -168,7 +168,7 @@
         import POS from './js-aruco2-master/src/posit1.js';
 
         // ==== Constants & Config ====
-        const MARKER_SIZE = 0.04;           // Marker size in meters
+        const MARKER_SIZE = 0.16;           // Marker size in meters
         const SMOOTHING_ALPHA = 0.2;        // EMA smoothing factor
         const MAX_DISTANCE_JUMP = 1.5;      // Max allowed jump to filter outliers
         const MAX_PATH_POINTS = 500;        // Max points in the path line
@@ -189,6 +189,119 @@
         const speedRange = document.getElementById('speedRange');
         const speedDisplay = document.getElementById('speedDisplay');
         const statusDisplay = document.getElementById('status');
+        // === Forklift Class ===
+        class ForkliftController {
+            constructor(forkliftModel, camera, options = {}) {
+                this.forkliftModel = forkliftModel;
+                this.camera = camera;
+
+                this.velocity = 0;
+                this.acceleration = options.acceleration ?? 0.02;
+                this.deceleration = options.deceleration ?? 0.01;
+                this.maxSpeed = options.maxSpeed ?? 0.1;
+                this.rotationSpeed = options.rotationSpeed ?? 0.05;
+                this.direction = new THREE.Vector3(0, 0, 1);
+
+                this.lastTarget = null;
+                this.tolerance = options.tolerance ?? 0.5;
+
+                this.trailPoints = [];
+                this.trailGeometry = new THREE.BufferGeometry();
+                this.trailMaterial = new THREE.LineBasicMaterial({ color: 0x0000ff });
+                this.trailLine = new THREE.Line(this.trailGeometry, this.trailMaterial);
+
+                if (this.forkliftModel.parent) {
+                    this.forkliftModel.parent.add(this.trailLine);
+                }
+
+                this.followMode = true;
+            }
+
+            getAverageMarkerPosition(markers, canvas) {
+                // Compute average marker center positions in world coords
+                const avgPosition = new THREE.Vector3(0, 0, 0);
+                if (markers.length === 0) return null;
+
+                markers.forEach(marker => {
+                    const center = marker.corners.reduce((sum, c) => sum.add(new THREE.Vector2(c.x, c.y)), new THREE.Vector2()).divideScalar(marker.corners.length);
+                    avgPosition.x += (center.x / canvas.width - 0.5) * 10;
+                    avgPosition.z += (0.5 - center.y / canvas.height) * 10;
+                });
+                avgPosition.divideScalar(markers.length);
+                avgPosition.y = 0;
+                return avgPosition;
+            }
+
+            update(markers, canvas) {
+                if (!this.forkliftModel) return;
+
+                const target = this.getAverageMarkerPosition(markers, canvas);
+                if (!target) {
+                    this.velocity = Math.max(0, this.velocity - this.deceleration);
+                    return;
+                }
+
+                const forkliftPos = this.forkliftModel.position;
+
+                if (!this.lastTarget || this.lastTarget.distanceTo(target) > this.tolerance) {
+                    this.lastTarget = target.clone();
+                }
+
+                if (this.lastTarget) {
+                    const desiredDir = new THREE.Vector3().subVectors(this.lastTarget, forkliftPos);
+                    desiredDir.y = 0;
+                    const distance = desiredDir.length();
+
+                    if (distance > 0.05) {
+                        desiredDir.normalize();
+                        const angleBetween = this.direction.angleTo(desiredDir);
+                        const goingBackward = angleBetween > Math.PI / 2;
+
+                        if (goingBackward) {
+                            this.velocity = Math.max(this.velocity - this.deceleration, -this.maxSpeed);
+                        } else {
+                            this.velocity = Math.min(this.velocity + this.acceleration, this.maxSpeed);
+                        }
+
+                        const cross = new THREE.Vector3().crossVectors(this.direction, desiredDir);
+                        if (cross.y !== 0) {
+                            this.direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.rotationSpeed * Math.sign(cross.y));
+                        }
+
+                        const movement = this.direction.clone().multiplyScalar(this.velocity);
+                        this.forkliftModel.position.add(movement);
+                        this.forkliftModel.lookAt(this.forkliftModel.position.clone().add(this.direction));
+                    } else {
+                        this.velocity = Math.max(0, this.velocity - this.deceleration);
+                    }
+                }
+
+                // Update trail
+                const lastPoint = this.trailPoints[this.trailPoints.length - 1];
+                const currentPos = this.forkliftModel.position.clone();
+                if (!lastPoint || lastPoint.distanceTo(currentPos) > 0.02) {
+                    this.trailPoints.push(currentPos.clone());
+                    if (this.trailPoints.length > 1000) this.trailPoints.shift();
+
+                    this.trailGeometry.setFromPoints(this.trailPoints);
+                    this.trailLine.geometry = this.trailGeometry;
+                }
+
+                // Camera follow
+                if (this.followMode) {
+                    const offset = new THREE.Vector3(
+                        -Math.sin(this.forkliftModel.rotation.y) * 5,
+                        3,
+                        -Math.cos(this.forkliftModel.rotation.y) * 5
+                    );
+
+                    const targetCamPos = this.forkliftModel.position.clone().add(offset);
+                    this.camera.position.lerp(targetCamPos, 0.1);
+                    this.camera.lookAt(this.forkliftModel.position);
+                    this.camera.up.set(0, 1, 0);
+                }
+            }
+        }
 
         // === Zone Class ===
         class Zone {
@@ -329,7 +442,6 @@
 
                 this.loader = new GLTFLoader();
                 this.forkliftModel = null;
-
                 this.loader.load(
                     './forklift.gltf',  // Replace with your model path or URL
                     (gltf) => {
@@ -342,7 +454,6 @@
                         console.error('Error loading forklift GLTF model:', error);
                     }
                 );
-
 
                 // Pallet and rack parameters
                 this.palletLength = config.palletLength ?? 1.2;
@@ -366,7 +477,22 @@
                 this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
                 this.renderer = new THREE.WebGLRenderer({ canvas: spaghettiCanvas, antialias: true });
                 this.renderer.setSize(window.innerWidth, window.innerHeight);
-                this.renderer.setClearColor(0x111111);
+                this.renderer.setClearColor(0xffffff);
+
+                // === 💡 Lighting Setup ===
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.5); // soft global light
+                this.scene.add(ambientLight);
+
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(10, 20, 10); // position above and angled
+                directionalLight.castShadow = true;
+                this.scene.add(directionalLight);
+
+                // Optional: Point light for forklift (if dynamic lighting is needed)
+                const forkliftLight = new THREE.PointLight(0xffaa00, 1, 10); // warm glow near forklift
+                forkliftLight.position.set(0, 2, 0); // will attach later
+                this.forkliftLight = forkliftLight;
+
 
                 this.itemMeshes = [];
 
@@ -511,7 +637,7 @@
                 this.lineGeometry.attributes.position.needsUpdate = true;
             }
 
-            processFrame2() {
+            processFrame() {
                 if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
                 // Draw video frame to hidden canvas for processing
@@ -607,131 +733,6 @@
 
                 }
             }
-
-            processFrame() {
-    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
-
-    // Draw video frame to hidden canvas for processing
-    hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-    const imageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
-
-    const markers = this.detector.detect(imageData);
-
-    let sumPos = new THREE.Vector3(0, 0, 0);
-    let totalWeight = 0;
-    let closestMarker = null;
-    let closestZ = Infinity;
-
-    markers.forEach(marker => {
-        const pose = this.estimatePose(marker);
-        if (!pose) return;
-
-        const t = pose.translation;
-        if (
-            isNaN(t[0]) || isNaN(t[1]) || isNaN(t[2]) ||
-            !isFinite(t[0]) || !isFinite(t[1]) || !isFinite(t[2])
-        ) return;
-
-        const pos = new THREE.Vector3(t[0], t[1], t[2]);
-        if (isNaN(pos.z) || !isFinite(pos.z)) return;
-
-        // Accumulate for average pose
-        sumPos.add(pos);
-        totalWeight++;
-
-        if (pos.z < closestZ) {
-            closestZ = pos.z;
-            closestMarker = marker;
-        }
-    });
-
-    // Optional: Still record marker ID
-    if (closestMarker) {
-        this.closestMarkerId = closestMarker.id;
-    } else {
-        this.closestMarkerId = null;
-    }
-
-    if (totalWeight > 0) {
-        const avgPos = sumPos.divideScalar(totalWeight);
-
-        if (!this.smoothedPos) {
-            this.smoothedPos = avgPos.clone();
-        } else {
-            if (this.smoothedPos.distanceTo(avgPos) > MAX_DISTANCE_JUMP) {
-                console.warn('Outlier detected, skipping frame');
-                return; // Skip frame
-            } else {
-                this.smoothedPos.lerp(avgPos, SMOOTHING_ALPHA);
-            }
-        }
-
-        this.forkliftPos.copy(this.smoothedPos);
-
-        // Extract rotation from closest marker pose and zero out X,Z rotations
-        if (closestMarker) {
-            const pose = this.estimatePose(closestMarker);
-            if (pose && pose.bestRotation) {
-                const rot = pose.bestRotation;
-                const rotationMatrix = new THREE.Matrix4();
-
-                rotationMatrix.set(
-                    rot[0][0], rot[0][1], rot[0][2], 0,
-                    rot[1][0], rot[1][1], rot[1][2], 0,
-                    rot[2][0], rot[2][1], rot[2][2], 0,
-                    0,         0,         0,         1
-                );
-
-                const quaternion = new THREE.Quaternion();
-                quaternion.setFromRotationMatrix(rotationMatrix);
-
-                // Convert to Euler angles (yaw-pitch-roll)
-                const euler = new THREE.Euler().setFromQuaternion(quaternion, 'YXZ');
-
-                // Zero out pitch (x) and roll (z), keep only yaw (y)
-                euler.x = 0;
-                euler.z = 0;
-
-                // Convert back to quaternion and store
-                this.forkliftQuaternion = new THREE.Quaternion().setFromEuler(euler);
-            }
-        }
-
-        this.updatePathLine(this.forkliftPos);
-
-        // === ✅ Zone Detection ===
-        const newZone = this.zones?.find(zone => zone.id === this.closestMarkerId);
-        if (newZone?.id !== this.currentZone?.id) {
-            const now = new Date();
-
-            // Exiting old zone
-            if (this.currentZone && this.zoneEntryTime) {
-                const duration = (now - this.zoneEntryTime) / 1000; // in seconds
-                this.zoneVisitLog.push({
-                    zoneId: this.currentZone.id,
-                    zoneName: this.currentZone.name,
-                    enteredAt: this.zoneEntryTime.toISOString(),
-                    exitedAt: now.toISOString(),
-                    duration: duration.toFixed(2) + 's'
-                });
-                console.log(`🏁 Exited ${this.currentZone.name} after ${duration.toFixed(2)}s`);
-            }
-
-            // Entering new zone
-            if (newZone) {
-                console.log(`🚧 Entered ${newZone.name}`);
-                this.zoneEntryTime = now;
-            } else {
-                this.zoneEntryTime = null;
-            }
-
-            if (this.currentZone) this.currentZone.setHighlighted(false);
-            if (newZone) newZone.setHighlighted(true);
-
-            this.currentZone = newZone;
-        }
-    }
-}
 
             animate(time = 0) {
                 requestAnimationFrame(this.animate);
