@@ -35,26 +35,49 @@
             left: 10px;
             z-index: 20;
             background: rgba(0, 0, 0, 0.7);
-            padding: 12px;
-            border-radius: 8px;
+            padding: 8px;
+            border-radius: 6px;
             user-select: none;
-            max-width: 280px;
+            max-width: 240px;
+            font-size: 13px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
         }
 
         #controls button,
-        #controls input {
-            margin: 4px 0;
-            width: 100%;
-            padding: 6px;
-            font-size: 14px;
-            border-radius: 4px;
+        #controls input,
+        #controls select {
+            margin: 0;
+            padding: 4px 6px;
+            font-size: 13px;
+            border-radius: 3px;
             border: none;
-            cursor: pointer;
+            width: 100%;
+            box-sizing: border-box;
         }
 
         #controls button:hover {
             background-color: #444;
         }
+
+        #speedRange {
+            width: 100%;
+        }
+
+        #status {
+            margin-top: 4px;
+            font-size: 12px;
+            text-align: center;
+            color: #aaa;
+        }
+
+        #controls hr {
+            margin: 8px 0;
+            border: 0;
+            border-top: 1px solid #555;
+        }
+
 
         #speedRange {
             width: 100%;
@@ -129,8 +152,6 @@
 
         <input type="text" id="searchItemInput" placeholder="Enter Item ID" />
         <button id="searchItemBtn">Search Item</button>
-
-
     </div>
 
 
@@ -142,11 +163,12 @@
         import * as THREE from 'three';
         import AR from './js-aruco2-master/src/aruco.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
         import POS from './js-aruco2-master/src/posit1.js';
 
         // ==== Constants & Config ====
-        const MARKER_SIZE = 0.16;           // Marker size in meters
+        const MARKER_SIZE = 0.04;           // Marker size in meters
         const SMOOTHING_ALPHA = 0.2;        // EMA smoothing factor
         const MAX_DISTANCE_JUMP = 1.5;      // Max allowed jump to filter outliers
         const MAX_PATH_POINTS = 500;        // Max points in the path line
@@ -303,7 +325,36 @@
 
         // ==== Tracker Class ====
         class WarehouseTracker {
-            constructor() {
+            constructor(config = {}) {
+
+                this.loader = new GLTFLoader();
+                this.forkliftModel = null;
+
+                this.loader.load(
+                    './forklift.gltf',  // Replace with your model path or URL
+                    (gltf) => {
+                        this.forkliftModel = gltf.scene;
+                        this.forkliftModel.scale.set(1, 1, 1); // Adjust scale if needed
+                        this.scene.add(this.forkliftModel);
+                    },
+                    undefined,
+                    (error) => {
+                        console.error('Error loading forklift GLTF model:', error);
+                    }
+                );
+
+
+                // Pallet and rack parameters
+                this.palletLength = config.palletLength ?? 1.2;
+                this.palletWidth = config.palletWidth ?? 0.8;
+                this.palletHeight = config.palletHeight ?? 0.144;
+                this.maxItemsPerRow = config.maxItemsPerRow ?? 5;
+                this.levelHeights = config.levelHeights ?? { floor: 0, mid: 1, top: 2 };
+                // Gap between rack levels 
+                this.rackLevelGap = config.rackLevelGap ?? 2.5;
+                this.rackSlotGap = config.rackSlotGap ?? 0.1;
+
+
                 // POSIT setup for pose estimation
                 this.posit = new POS.Posit(MARKER_SIZE, hiddenCanvas.width);
 
@@ -318,7 +369,6 @@
                 this.renderer.setClearColor(0x111111);
 
                 this.itemMeshes = [];
-
 
                 this.labelRenderer = new CSS2DRenderer();
                 this.labelRenderer.setSize(window.innerWidth, window.innerHeight);
@@ -461,7 +511,7 @@
                 this.lineGeometry.attributes.position.needsUpdate = true;
             }
 
-            processFrame() {
+            processFrame2() {
                 if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
                 // Draw video frame to hidden canvas for processing
@@ -558,6 +608,272 @@
                 }
             }
 
+            processFrame() {
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+    // Draw video frame to hidden canvas for processing
+    hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+    const imageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+
+    const markers = this.detector.detect(imageData);
+
+    let sumPos = new THREE.Vector3(0, 0, 0);
+    let totalWeight = 0;
+    let closestMarker = null;
+    let closestZ = Infinity;
+
+    markers.forEach(marker => {
+        const pose = this.estimatePose(marker);
+        if (!pose) return;
+
+        const t = pose.translation;
+        if (
+            isNaN(t[0]) || isNaN(t[1]) || isNaN(t[2]) ||
+            !isFinite(t[0]) || !isFinite(t[1]) || !isFinite(t[2])
+        ) return;
+
+        const pos = new THREE.Vector3(t[0], t[1], t[2]);
+        if (isNaN(pos.z) || !isFinite(pos.z)) return;
+
+        // Accumulate for average pose
+        sumPos.add(pos);
+        totalWeight++;
+
+        if (pos.z < closestZ) {
+            closestZ = pos.z;
+            closestMarker = marker;
+        }
+    });
+
+    // Optional: Still record marker ID
+    if (closestMarker) {
+        this.closestMarkerId = closestMarker.id;
+    } else {
+        this.closestMarkerId = null;
+    }
+
+    if (totalWeight > 0) {
+        const avgPos = sumPos.divideScalar(totalWeight);
+
+        if (!this.smoothedPos) {
+            this.smoothedPos = avgPos.clone();
+        } else {
+            if (this.smoothedPos.distanceTo(avgPos) > MAX_DISTANCE_JUMP) {
+                console.warn('Outlier detected, skipping frame');
+                return; // Skip frame
+            } else {
+                this.smoothedPos.lerp(avgPos, SMOOTHING_ALPHA);
+            }
+        }
+
+        this.forkliftPos.copy(this.smoothedPos);
+
+        // Extract rotation from closest marker pose and zero out X,Z rotations
+        if (closestMarker) {
+            const pose = this.estimatePose(closestMarker);
+            if (pose && pose.bestRotation) {
+                const rot = pose.bestRotation;
+                const rotationMatrix = new THREE.Matrix4();
+
+                rotationMatrix.set(
+                    rot[0][0], rot[0][1], rot[0][2], 0,
+                    rot[1][0], rot[1][1], rot[1][2], 0,
+                    rot[2][0], rot[2][1], rot[2][2], 0,
+                    0,         0,         0,         1
+                );
+
+                const quaternion = new THREE.Quaternion();
+                quaternion.setFromRotationMatrix(rotationMatrix);
+
+                // Convert to Euler angles (yaw-pitch-roll)
+                const euler = new THREE.Euler().setFromQuaternion(quaternion, 'YXZ');
+
+                // Zero out pitch (x) and roll (z), keep only yaw (y)
+                euler.x = 0;
+                euler.z = 0;
+
+                // Convert back to quaternion and store
+                this.forkliftQuaternion = new THREE.Quaternion().setFromEuler(euler);
+            }
+        }
+
+        this.updatePathLine(this.forkliftPos);
+
+        // === ✅ Zone Detection ===
+        const newZone = this.zones?.find(zone => zone.id === this.closestMarkerId);
+        if (newZone?.id !== this.currentZone?.id) {
+            const now = new Date();
+
+            // Exiting old zone
+            if (this.currentZone && this.zoneEntryTime) {
+                const duration = (now - this.zoneEntryTime) / 1000; // in seconds
+                this.zoneVisitLog.push({
+                    zoneId: this.currentZone.id,
+                    zoneName: this.currentZone.name,
+                    enteredAt: this.zoneEntryTime.toISOString(),
+                    exitedAt: now.toISOString(),
+                    duration: duration.toFixed(2) + 's'
+                });
+                console.log(`🏁 Exited ${this.currentZone.name} after ${duration.toFixed(2)}s`);
+            }
+
+            // Entering new zone
+            if (newZone) {
+                console.log(`🚧 Entered ${newZone.name}`);
+                this.zoneEntryTime = now;
+            } else {
+                this.zoneEntryTime = null;
+            }
+
+            if (this.currentZone) this.currentZone.setHighlighted(false);
+            if (newZone) newZone.setHighlighted(true);
+
+            this.currentZone = newZone;
+        }
+    }
+}
+
+            animate(time = 0) {
+                requestAnimationFrame(this.animate);
+
+                if (!this.isPlayingBack) {
+                    this.processFrame();
+                    statusDisplay.textContent = `Status: Tracking - Zone: ${this.currentZone ? this.currentZone.name : 'Unknown'}`;
+                    if (this.forkliftModel && this.forkliftPos) {
+                        this.forkliftModel.position.copy(this.forkliftPos);
+                    }
+
+                } else {
+                    this.playback(time);
+                }
+
+                this.zones.forEach(zone => {
+                    if (zone.spriteLabel) {
+                        zone.spriteLabel.quaternion.copy(this.camera.quaternion);
+                    }
+                });
+                this.labelRenderer.render(this.scene, this.camera);
+
+                this.controls.update();
+                this.renderer.render(this.scene, this.camera);
+            }
+
+            captureItem() {
+                const itemID = prompt('Enter Item ID:');
+                if (!itemID) return alert('Item ID is required');
+
+                const level = prompt('Enter level (floor, mid, top):', 'floor').toLowerCase();
+                const levelIndex = this.levelHeights[level];
+
+                if (levelIndex === undefined) {
+                    alert('Invalid level. Please enter "floor", "mid", or "top".');
+                    return;
+                }
+
+                const {
+                    palletLength,
+                    palletWidth,
+                    palletHeight,
+                    maxItemsPerRow,
+                    levelHeights
+                } = this;
+
+                const forkliftPos = this.forkliftPos.clone();
+                let itemPosition;
+
+                if (level === 'floor') {
+                    // Find overlapping floor items at forklift position
+                    const overlappingItems = this.storedItems.filter(item =>
+                        item.level === 'floor' &&
+                        Math.abs(item.position.x - forkliftPos.x) < palletLength &&
+                        Math.abs(item.position.z - forkliftPos.z) < palletWidth
+                    );
+
+                    if (overlappingItems.length >= 2) {
+                        alert('Maximum pallet stack reached at this position.');
+                        return;
+                    }
+
+                    const yOffset = overlappingItems.length * palletHeight;
+                    itemPosition = new THREE.Vector3(forkliftPos.x, yOffset, forkliftPos.z);
+                } else {
+                    // MID or TOP rack levels
+                    const rowSpacingX = palletLength + this.rackSlotGap;
+                    const rowSpacingZ = palletWidth;
+                    const yOffset = levelHeights[level] * (palletHeight + this.rackLevelGap);
+
+                    const rowIndex = Math.round(forkliftPos.z / rowSpacingZ);
+                    const slotIndex = Math.round(forkliftPos.x / rowSpacingX);
+
+                    const itemsInRow = this.storedItems.filter(item =>
+                        item.level === level &&
+                        Math.round(item.position.z / rowSpacingZ) === rowIndex
+                    );
+
+                    if (itemsInRow.length >= maxItemsPerRow) {
+                        alert(`Rack row ${rowIndex} at level ${level} is full.`);
+                        return;
+                    }
+
+                    let finalSlotIndex = slotIndex;
+                    const slotTaken = itemsInRow.some(item =>
+                        Math.round(item.position.x / rowSpacingX) === slotIndex
+                    );
+
+                    if (slotTaken) {
+                        for (let i = 0; i < maxItemsPerRow; i++) {
+                            if (!itemsInRow.some(item => Math.round(item.position.x / rowSpacingX) === i)) {
+                                finalSlotIndex = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    const finalX = finalSlotIndex * rowSpacingX;
+                    const finalZ = rowIndex * rowSpacingZ;
+                    itemPosition = new THREE.Vector3(finalX, yOffset, finalZ);
+
+                    const collision = this.storedItems.some(item =>
+                        item.level === level &&
+                        item.position.equals(itemPosition)
+                    );
+
+                    if (collision) {
+                        alert('An item already exists at this rack position.');
+                        return;
+                    }
+                }
+
+                this.storedItems.push({
+                    id: itemID,
+                    position: itemPosition.clone(),
+                    level: level,
+                    timestamp: new Date()
+                });
+
+                const labelDiv = document.createElement('div');
+                labelDiv.className = 'label';
+                labelDiv.textContent = itemID;
+                labelDiv.style.marginTop = '-1em';
+                labelDiv.style.padding = '4px 8px';
+                labelDiv.style.background = 'rgba(0, 0, 0, 0.7)';
+                labelDiv.style.color = 'white';
+                labelDiv.style.borderRadius = '4px';
+                labelDiv.style.fontSize = '12px';
+
+                const label = new CSS2DObject(labelDiv);
+                label.position.set(0, 0.4, 0);
+
+                const geometry = new THREE.BoxGeometry(palletLength, palletHeight, palletWidth);
+                const material = new THREE.MeshBasicMaterial({ color: 0x00ffcc });
+                const box = new THREE.Mesh(geometry, material);
+                box.position.copy(itemPosition);
+                box.name = `Item-${itemID}`;
+                this.scene.add(box);
+                box.add(label);
+                this.itemMeshes.push(box);
+            }
+
             exportZoneVisitLog() {
                 if (this.zoneVisitLog.length === 0) {
                     alert('No zone visit data to export.');
@@ -577,27 +893,6 @@
                 URL.revokeObjectURL(url);
             }
 
-            animate(time = 0) {
-                requestAnimationFrame(this.animate);
-
-                if (!this.isPlayingBack) {
-                    this.processFrame();
-                    statusDisplay.textContent = `Status: Tracking - Zone: ${this.currentZone ? this.currentZone.name : 'Unknown'}`;
-                } else {
-                    this.playback(time);
-                }
-
-                this.zones.forEach(zone => {
-                    if (zone.spriteLabel) {
-                        zone.spriteLabel.quaternion.copy(this.camera.quaternion);
-                    }
-                });
-                this.labelRenderer.render(this.scene, this.camera);
-
-                this.controls.update();
-                this.renderer.render(this.scene, this.camera);
-            }
-
             updateZoneLabels() {
                 this.zones.forEach(zone => {
                     if (!zone.labelElement) return;
@@ -611,145 +906,6 @@
                     zone.labelElement.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
                     zone.labelElement.style.display = (pos.z < 1 && pos.z > -1) ? 'block' : 'none';
                 });
-            }
-
-            captureItem() {
-                const itemID = prompt('Enter Item ID:');
-                if (!itemID) return alert('Item ID is required');
-
-                const levels = {
-                    floor: 0,
-                    mid: 1.5,
-                    top: 3
-                };
-
-                const level = prompt('Enter level (floor, mid, top):', 'floor').toLowerCase();
-                const yOffset = levels[level];
-                if (yOffset === undefined) {
-                    alert('Invalid level. Please enter "floor", "mid", or "top".');
-                    return;
-                }
-
-                /*                 const zone = this.currentZone;
-                                if (!zone) {
-                                    alert('No zone detected.');
-                                    return;
-                                }
-                 */
-                const forkliftPos = this.forkliftPos.clone();
-
-                // Parameters for rack rows
-                const rowSpacingX = 0.7;  // Distance between items horizontally in a rack row
-                const rowSpacingZ = 0.4;   // Distance between rows in a rack (depth)
-                const maxItemsPerRow = 5;
-
-                let itemPosition;
-
-                if (level === 'floor') {
-                    // FLOOR LEVEL (outside racks)
-                    // Position exactly at forklift, but prevent overlap with existing floor items in same zone
-
-                    // Check for existing floor items in the same zone close to forklift position (within item size)
-                    const collision = this.storedItems.some(item =>
-/*                         item.zone === zone.name &&
- */                        item.level === 'floor' &&
-                        item.position.distanceTo(forkliftPos) < 0.3 // Assuming item size ~0.3
-                    );
-
-                    if (collision) {
-                        alert('An item already exists at this floor position.');
-                        return;
-                    }
-
-                    // Use forklift exact X,Z but floor Y
-                    itemPosition = new THREE.Vector3(forkliftPos.x, yOffset, forkliftPos.z);
-
-                } else {
-                    // MID or TOP LEVEL (inside rack)
-
-                    // Snap forklift position to nearest rack grid row and column
-
-                    // Calculate row (along Z axis) and slot (along X axis) indexes inside rack
-                    const rowIndex = Math.round(forkliftPos.z / rowSpacingZ);
-                    const slotIndex = Math.round(forkliftPos.x / rowSpacingX);
-
-                    // Count how many items already in this row at this level and zone
-                    const itemsInRow = this.storedItems.filter(item =>
-/*                         item.zone === zone.name &&
- */                        item.level === level &&
-                        Math.round(item.position.z / rowSpacingZ) === rowIndex
-                    );
-
-                    if (itemsInRow.length >= maxItemsPerRow) {
-                        alert(`Rack row ${rowIndex} at level ${level} is full.`);
-                        return;
-                    }
-
-                    // Place item in the next available slot in that row
-                    // Find next free slotIndex in row (preferably forklift aligned slot if free)
-                    const slotTaken = itemsInRow.some(item =>
-                        Math.round(item.position.x / rowSpacingX) === slotIndex
-                    );
-
-                    let finalSlotIndex = slotIndex;
-                    if (slotTaken) {
-                        // Find next free slot in this row up to maxItemsPerRow
-                        for (let i = 0; i < maxItemsPerRow; i++) {
-                            if (!itemsInRow.some(item => Math.round(item.position.x / rowSpacingX) === i)) {
-                                finalSlotIndex = i;
-                                break;
-                            }
-                        }
-                    }
-
-                    itemPosition = new THREE.Vector3(finalSlotIndex * rowSpacingX, yOffset, rowIndex * rowSpacingZ);
-
-                    // Just in case, double check no collision at this position
-                    const collision = this.storedItems.some(item =>
-/*                         item.zone === zone.name &&
- */                        item.level === level &&
-                        item.position.equals(itemPosition)
-                    );
-
-                    if (collision) {
-                        alert('An item already exists at this rack position.');
-                        return;
-                    }
-                }
-
-                // Add item to stored items
-                this.storedItems.push({
-                    id: itemID,
-                    position: itemPosition.clone(),
-/*                     zone: zone.name,
- */                    level: level,
-                    timestamp: new Date()
-                });
-
-                // Create label div
-                const labelDiv = document.createElement('div');
-                labelDiv.className = 'label';
-                labelDiv.textContent = itemID;
-                labelDiv.style.marginTop = '-1em';
-                labelDiv.style.padding = '4px 8px';
-                labelDiv.style.background = 'rgba(0, 0, 0, 0.7)';
-                labelDiv.style.color = 'white';
-                labelDiv.style.borderRadius = '4px';
-                labelDiv.style.fontSize = '12px';
-
-                // Create label and item mesh
-                const label = new CSS2DObject(labelDiv);
-                label.position.set(0, 0.4, 0);
-
-                const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3);
-                const material = new THREE.MeshBasicMaterial({ color: 0x00ffcc });
-                const box = new THREE.Mesh(geometry, material);
-                box.position.copy(itemPosition);
-                box.name = `Item-${itemID}`;
-                this.scene.add(box);
-                box.add(label);
-                this.itemMeshes.push(box); // After this.scene.add(box)
-
             }
 
             exportTrackedPath() {
@@ -945,7 +1101,14 @@
         }
 
         // ==== Setup & Initialization ====
-        const tracker = new WarehouseTracker();
+        const tracker = new WarehouseTracker({
+            palletLength: 1.2,
+            palletWidth: 0.8,
+            palletHeight: .144,
+            maxItemsPerRow: 5,
+            rackLevelGap: 2.5,
+            levelHeights: { floor: 0, mid: 1, top: 2 }
+        });
 
         // Webcam setup & start animation after video metadata ready
         navigator.mediaDevices.getUserMedia({ video: true })
@@ -1026,6 +1189,7 @@
                 });
             }
         });
+
         document.getElementById('searchItemBtn').addEventListener('click', () => {
             const searchId = document.getElementById('searchItemInput').value.trim();
             if (!searchId) return alert('Please enter an Item ID.');
@@ -1044,8 +1208,6 @@
                 alert(`Item ID ${searchId} not found.`);
             }
         });
-
-
         document.getElementById('btnTopView').onclick = () => tracker.setDefaultView('top');
         document.getElementById('btnFrontView').onclick = () => tracker.setDefaultView('front');
         document.getElementById('btnSideView').onclick = () => tracker.setDefaultView('side');
