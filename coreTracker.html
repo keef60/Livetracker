@@ -461,9 +461,24 @@
                 this.palletHeight = config.palletHeight ?? 0.144;
                 this.maxItemsPerRow = config.maxItemsPerRow ?? 5;
                 this.levelHeights = config.levelHeights ?? { floor: 0, mid: 1, top: 2 };
+
+
+
+                this.palletModel = null;
+                this.loader.load(
+                    './pallet1.gltf',  // <-- Replace with actual path to your pallet model
+                    (gltf) => {
+                        this.palletModel = gltf.scene;
+                    },
+                    undefined,
+                    (error) => {
+                        console.error('Error loading pallet GLTF model:', error);
+                    }
+                );
+
                 // Gap between rack levels 
                 this.rackLevelGap = config.rackLevelGap ?? 2.5;
-                this.rackSlotGap = config.rackSlotGap ?? 0.1;
+                this.rackSlotGap = config.rackSlotGap ?? 0.6;
 
 
                 // POSIT setup for pose estimation
@@ -852,7 +867,7 @@
                     timestamp: new Date()
                 });
 
-                const labelDiv = document.createElement('div');
+/*                 const labelDiv = document.createElement('div');
                 labelDiv.className = 'label';
                 labelDiv.textContent = itemID;
                 labelDiv.style.marginTop = '-1em';
@@ -872,7 +887,39 @@
                 box.name = `Item-${itemID}`;
                 this.scene.add(box);
                 box.add(label);
-                this.itemMeshes.push(box);
+                this.itemMeshes.push(box); */
+
+
+                if (!this.palletModel) {
+    alert('Pallet model not loaded yet.');
+    return;
+}
+
+const palletClone = this.palletModel.clone(true); // Deep clone with materials
+palletClone.position.copy(itemPosition);
+palletClone.name = `Item-${itemID}`;
+
+// Optional: Adjust scale if needed
+palletClone.scale.set(this.palletLength, this.palletHeight, this.palletWidth);
+
+// Add label
+const labelDiv = document.createElement('div');
+labelDiv.className = 'label';
+labelDiv.textContent = itemID;
+labelDiv.style.marginTop = '-1em';
+labelDiv.style.padding = '4px 8px';
+labelDiv.style.background = 'rgba(0, 0, 0, 0.7)';
+labelDiv.style.color = 'white';
+labelDiv.style.borderRadius = '4px';
+labelDiv.style.fontSize = '12px';
+
+const label = new CSS2DObject(labelDiv);
+label.position.set(0, 0.4, 0);
+palletClone.add(label);
+
+this.scene.add(palletClone);
+this.itemMeshes.push(palletClone);
+
             }
 
             exportZoneVisitLog() {
@@ -1105,7 +1152,7 @@
         const tracker = new WarehouseTracker({
             palletLength: 1.2,
             palletWidth: 0.8,
-            palletHeight: .144,
+            palletHeight: 1.44,
             maxItemsPerRow: 5,
             rackLevelGap: 2.5,
             levelHeights: { floor: 0, mid: 1, top: 2 }
